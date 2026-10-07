@@ -76,3 +76,46 @@ R2 scope removed CPU, OOM, storage eviction, filesystem freshness, and containme
 probes. Their fake-agent behaviors and preflight code have been removed. Current
 `make k8s-preflight` checks projected-token issuance only, alongside setup guards.
 The fixed resource template, controller capacity limit, and API quota remain.
+
+## 2026-10-08 — Narrowed R2 validation completed
+
+**Completed:** `make test` (128), `make test-integration` (4), and
+`make test-k8s` (18, plus the token preflight). The final cluster suite took
+288 seconds. Ruff and whitespace checks passed. This is controller and API
+behavior evidence only; it establishes no execution isolation guarantee.
+
+Observed on Colima:
+
+- Happy-path input survived kubelet environment processing byte for byte.
+  Lost create responses and controller restarts retained completion authority;
+  no execution issued a second create. Outages preserved queued work while
+  cancellation and deadlines still applied.
+- The kubelet produced `DeadlineExceeded` without reconciliation. Cleanup,
+  orphan checks, and same-name UID replacement behaved as specified.
+- The projected token carried the intended audience, subject, expiry, and Pod
+  binding; its observed lifetime was 600 seconds. The Kubernetes API rejected
+  it with 401 over verified TLS. Environment names matched the exact approved
+  allowlist, including runtime-provided HOME and HOSTNAME.
+- All eight admission negative cases were rejected by PodSecurity, and all
+  eight positive controls passed in the temporary unlabeled namespace. No
+  positive control was deferred. The writable-root control wrote and read
+  back its probe, while the fixed template returned EROFS.
+- Global capacity and the quota backstop held. Real controller-token calls
+  could read Pods in agent-exec, could not read Secrets there, and could not
+  dry-run a Pod create in rook-dev. Access reviews matched the specified role.
+
+Corrections during validation: the permissions assertion initially omitted
+built-in OpenID discovery URLs. The UID-conflict parser initially assumed a
+storage-layer error shape; this API returns `details.kind: Pod` and a message
+that the UID in the precondition does not match the UID in the record. The
+parser and unit fixture now recognize that response; the real test records
+409 and verifies the replacement remains. One integration attempt received a
+500 at Mock Workday login; subsequent complete runs passed using only its HTTP
+API, without changing that service.
+
+Sanitized local evidence: `.local/k8s/evidence/ISO-1-ID-8.json`,
+`ISO-1-permissions.txt`, `ISO-5-admission.json`, `LC-11-uid-conflict.json`, and
+per-Pod status JSON. No bearer credentials or Pod env values are saved there.
+Each cluster test ended with no Pods in agent-exec; temporary control namespaces
+were deleted. The two marked lab namespaces, service accounts, Role,
+RoleBinding, quota, and local image remain available. No push was performed.
