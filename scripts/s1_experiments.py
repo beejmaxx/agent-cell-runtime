@@ -7,6 +7,7 @@ Operator mutations are performed separately and recorded alongside these results
 import json
 import os
 import statistics
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ from k8s_support import admin_pod, evidence, poll
 from test_k8s import launched
 from test_k8s import live as live_fixture
 
-from scripts.k8s import STATE
+from scripts.k8s import STATE, kubectl
 
 live = live_fixture
 
@@ -48,6 +49,11 @@ def observe(live, ids, label):
                 if pod:
                     item["pod_uid"] = pod["metadata"]["uid"]
                     item["phase"] = pod.get("status", {}).get("phase")
+                    if item["phase"] in {"Failed", "Succeeded"} and "stdout" not in item:
+                        try:
+                            item["stdout"] = kubectl("logs", f"exec-{key}", "-n", "agent-exec")
+                        except subprocess.SubprocessError as exc:
+                            item["stdout_error"] = type(exc).__name__
                     item["capacity"] = (
                         pod["metadata"].get("annotations", {}).get("CapacityProvisioned")
                     )
@@ -125,6 +131,89 @@ def test_S1_E10_completion_binding(live):
 
 def test_S1_E4_E5_E6_E7_probes(live):
     config = json.loads((STATE / "probe-targets.json").read_text())
+    if config.get("peer_control"):
+        peer = launched(live, "listen")
+        pod = poll(lambda: _running_peer(peer), 300)
+        positive = kubectl(
+            "exec",
+            f"exec-{peer}",
+            "-n",
+            "agent-exec",
+            "--",
+            "python",
+            "-c",
+            "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8080').read().decode())",
+        )
+        save(
+            config["label"] + "-peer-control",
+            {"pod_ip": pod["status"]["podIP"], "local_listener_response": positive},
+        )
+        config["input"].setdefault("targets", []).append(
+            {
+                "name": "peer execution listener",
+                "host": pod["status"]["podIP"],
+                "port": 8080,
+                "method": "GET",
+            }
+        )
     key = launched(live, "probe", **config["input"])
     results = observe(live, [key], config["label"])
+    if results[key]["status"] != "SUCCEEDED":
+        try:
+            output = kubectl("logs", f"exec-{key}", "-n", "agent-exec")
+            save(config["label"] + "-stdout", {"stdout": output})
+        except subprocess.SubprocessError as exc:
+            save(config["label"] + "-stdout", {"error_type": type(exc).__name__})
     assert results[key]["status"] == "SUCCEEDED"
+
+
+def _running_peer(key):
+    pod = admin_pod(f"exec-{key}")
+    return pod if pod and pod.get("status", {}).get("phase") == "Running" else None
+
+
+def test_S1_E8_admitted_privileges(live, monkeypatch):
+    from k8s_support import admin_create
+    from test_k8s import injected
+
+    from agent_runtime import kubernetes
+
+    trials = {
+        "root": {"runAsUser": 0, "runAsNonRoot": False},
+        "privileged": {"privileged": True},
+        "escalation": {"allowPrivilegeEscalation": True},
+        "net_raw": {"capabilities": {"drop": ["ALL"], "add": ["NET_RAW"]}},
+        "unconfined": {"seccompProfile": {"type": "Unconfined"}},
+        "writable_root_and_bind_service": {
+            "readOnlyRootFilesystem": False,
+            "capabilities": {"drop": ["ALL"], "add": ["NET_BIND_SERVICE"]},
+        },
+    }
+    observations = {}
+    for name, changes in trials.items():
+        manifest = injected(live, behavior="inspect")
+        manifest["spec"]["containers"][0]["securityContext"].update(changes)
+        response = admin_create(manifest, dry_run=True)
+        observations[name] = {"returncode": response.returncode, "stderr": response.stderr}
+    save("E8-admission", {"trials": observations})
+    assert observations["writable_root_and_bind_service"]["returncode"] == 0
+    assert all(
+        observations[k]["returncode"] != 0 for k in trials if k != "writable_root_and_bind_service"
+    )
+    original = kubernetes.pod_manifest
+
+    def variant(*args):
+        manifest = original(*args)
+        manifest["spec"]["containers"][0]["securityContext"].update(
+            trials["writable_root_and_bind_service"]
+        )
+        return manifest
+
+    monkeypatch.setattr(kubernetes, "pod_manifest", variant)
+    key = launched(live, "inspect")
+    result = observe(live, [key], "E8-inspect")
+    assert result[key]["status"] == "SUCCEEDED"
+    config = json.loads((STATE / "probe-targets.json").read_text())
+    key = launched(live, "probe", **config["input"])
+    result = observe(live, [key], "E8-probes")
+    assert result[key]["status"] == "SUCCEEDED"
