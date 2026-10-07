@@ -1,8 +1,20 @@
-# S1: EKS Fargate as the execution substrate (experiment)
+# S1: EKS Fargate as the execution substrate, in its own trust domain (experiment)
 
 **Status:** draft for review. **No AWS resources are created until the user explicitly approves the spend.**
 
 **Purpose:** a decision gate. S1 answers whether EKS on Fargate can host execution Pods under [threat-model revision 1](threat-model.md), and what it costs in latency, money, and residual exposure. It is a narrow experiment, not a platform build: everything is created for a session and destroyed afterwards.
+
+**Trust-domain requirement (2026-10-08):** compromising the execution domain must give no useful authority over the trusted platform. S1 therefore separates three trust domains, each with its own infrastructure boundary, connected only by narrow authenticated paths:
+
+| Domain | Contents | Infrastructure in S1 |
+|---|---|---|
+| Workday core | Mock Workday | Not used in S1. Later: its existing ECS deployment, or the Hetzner cluster, reached only by the gateway as an external API |
+| Trusted runtime | Controller, gateway (the `/complete` endpoint in S1), Postgres | The existing `lab-dev` VPC: one EC2 host |
+| Execution | Customer agent Pods | A **new VPC with no internet gateway** and a dedicated EKS cluster, one Fargate VM per execution |
+
+- **The only path from execution to trusted is AWS PrivateLink:** an interface endpoint in the execution VPC, connected to an endpoint service in front of the gateway. There is no VPC peering and no route between the VPCs.
+- **Separate AWS accounts** per domain are the production-grade form and a later stage. S1 uses one account with two VPCs.
+- **A separate cluster alone is not the goal:** no IAM role, database, or network path may span the domains beyond what is listed here.
 
 **Why Fargate:**
 
@@ -13,7 +25,7 @@
 **Reuses:**
 
 - R2's `KubernetesBackend`, fake agent, and `test-k8s` harness, pointed at EKS instead of Colima;
-- the dev network foundation (`infra/platform/envs/dev/foundation`).
+- the dev network foundation (`infra/platform/envs/dev/foundation`) as the trusted VPC.
 
 **Not in S1:**
 
@@ -73,38 +85,39 @@
 ## 2. Topology
 
 ```text
-VPC lab-dev (10.20.0.0/16), us-east-2
+TRUSTED RUNTIME DOMAIN: VPC lab-dev (10.20.0.0/16), existing
+│  trusted host: EC2 t3.small, amd64, public subnet (2a), Elastic IP; no inbound from the internet; operated through SSM
+│    Postgres, runtime app (controller + /complete on :8000), R2 test harness
+│    IAM role → EKS access entry (execution cluster) → group agent-runtime-controllers
+│    reaches the execution cluster's API through its public endpoint (restricted to this host's Elastic IP and the operator's /32)
+│  internal NLB :8000 → trusted host :8000
+│  VPC endpoint service (PrivateLink) on that NLB, allowing only the execution account and VPC
 │
-├── public subnet (2a)
-│     trusted host (EC2, t3.small, amd64, public IP, NO inbound from the internet; operated through SSM)
-│       Postgres, runtime app (controller + /complete on :8000), R2 test harness
-│       IAM role → EKS access entry → group agent-runtime-controllers
-│       SG: inbound :8000 only from the execution-Pod SG
+│                         ▲ PrivateLink only: no peering, no routes between the VPCs
 │
-├── private subnets (2a, 2b): no route to the internet
-│     EKS control-plane network interfaces (private endpoint access)
-│     Fargate profile "agent-exec" (namespace agent-exec) → execution Pods
-│       SG (SecurityGroupPolicy): egress only to trusted host :8000, the endpoint SG :443,
-│       the S3 prefix list :443, and the cluster SG :443 if Fargate requires it
-│     interface endpoints ecr.api, ecr.dkr (2a only), with a policy limited to the experiment repo
-│     S3 gateway endpoint, with a policy limited to the ECR layer bucket
-│
-├── Route 53 Resolver DNS Firewall (VPC association): allowlist, block everything else; query logging → CloudWatch Logs
-│
-└── EKS 1.36 cluster "lab-dev-s1": no node groups, no CoreDNS add-on; access mode API
-      endpoint: private + public restricted to the operator's /32 (admin kubectl from the Mac)
+EXECUTION DOMAIN: new VPC lab-exec (10.30.0.0/16), created and destroyed by S1
+   private subnets only (2a, 2b); NO internet gateway, NO NAT
+   EKS 1.36 cluster "lab-exec-s1": no node groups, no CoreDNS; access mode API
+     endpoint: private (for Fargate) + public restricted to the trusted host's Elastic IP and the operator's /32
+   Fargate profile "agent-exec" (namespace agent-exec) → execution Pods
+     SG (SecurityGroupPolicy): egress only to the gateway endpoint :8000, the ECR endpoint SG :443,
+     the S3 prefix list :443, and the cluster SG :443 if Fargate requires it
+   interface endpoint → gateway endpoint service (its IP is injected as RUNTIME_URL)
+   interface endpoints ecr.api, ecr.dkr; S3 gateway endpoint (restricted policies)
+   Route 53 Resolver DNS Firewall on this VPC only: allowlist the AWS names Fargate needs; block everything else; query logging
 ```
 
 ## 3. Decisions (proposed)
 
 | # | Decision | Alternative | Why |
 |---|---|---|---|
-| S1-D1 | **Trusted services run on one EC2 host outside the cluster,** in the public subnet with no inbound internet access, operated through SSM | ECS task; a managed node group in the cluster | Keeps the topology rule (trusted services outside the execution cluster) with the fewest moving parts. A public subnet avoids a NAT gateway (about $0.045/hour). |
+| S1-D1 | **Trusted services run on one EC2 host in the trusted VPC (`lab-dev`),** in a public subnet with no inbound internet access, operated through SSM | ECS task; a second EKS cluster | The trust-domain rule with the fewest moving parts. A second cluster adds cost and nothing S1 measures. A public subnet avoids a NAT gateway (about $0.045/hour). |
+| S1-D10 | **PrivateLink is the only execution-to-trusted path:** an NLB plus endpoint service in front of the gateway; one interface endpoint in the execution VPC | VPC peering or a transit gateway | Peering creates routes between whole networks. PrivateLink exposes exactly one service, and only in one direction. |
 | S1-D2 | **No compute in the cluster except Fargate execution Pods:** no node groups, no CoreDNS | A system node group | Nothing trusted runs in the execution cluster. Execution Pods need no DNS: the callback address is an IP injected by the controller. |
-| S1-D3 | **Execution subnets have no internet route,** with ECR reached through endpoints | NAT gateway | Routing is a second egress layer independent of security groups, and it is cheaper. |
+| S1-D3 | **The execution VPC has no internet gateway at all,** with ECR reached through endpoints | NAT gateway; an internet gateway with restrictive routes | "No route out" becomes a property of the network, not a route-table setting. It is a second egress layer independent of security groups, and cheaper. |
 | S1-D4 | **Endpoint policies:** ECR limited to the experiment repo; S3 limited to the Region's ECR layer bucket | Default (full-access) endpoint policies | Default policies turn endpoints into exfiltration paths. |
-| S1-D5 | **DNS Firewall allowlist:** the AWS service names Fargate and the host need, plus the host's package mirrors; block everything else | No DNS control | Security groups cannot close DNS tunneling (§1). Allowlisted names are not attacker-controlled, so they cannot carry tunneled data. |
-| S1-D6 | **API endpoint private plus public, the public side restricted to the operator's /32** | Private only (admin through the host) | The experiment trade-off is admin convenience. The operator IP must be the real egress IP (the Mac's VPN or proxy changes it). Production would be private only. |
+| S1-D5 | **DNS Firewall on the execution VPC only:** allowlist the AWS service names Fargate needs; block everything else | No DNS control | Security groups cannot close DNS tunneling (§1). Allowlisted names are not attacker-controlled, so they cannot carry tunneled data. The trusted VPC is unaffected. |
+| S1-D6 | **API endpoint private (for Fargate) plus public, restricted to the trusted host's Elastic IP and the operator's /32** | Private only, with the controller reaching it over peering | The controller lives in another VPC, and peering would break S1-D10. An IAM-authenticated public endpoint with a tight CIDR list keeps the networks unconnected. The operator IP must be the real egress IP (the Mac's VPN or proxy changes it). |
 | S1-D7 | **Terraform** in `infra/experiments/fargate/`, its own state key in the dev state bucket, reading the network from SSM, with tags `lab=agent-runtime`, `experiment=s1` | Console or CLI | IaC is a job requirement, and it makes teardown complete. |
 | S1-D8 | **amd64 everywhere;** the fake agent image is pushed to ECR repo `agent-runtime/fake-agent` and referenced by digest | Multi-arch | Avoids an unverified arm64 dependency (§0, item 3). |
 | S1-D9 | **Reuse R2's harness:** `make test-k8s` gains an `eks` target profile. The context guard requires the expected cluster ARN instead of localhost. Admin actions use the operator's kubectl. | A new harness | Directly tests whether R2's API-level evidence carries over to EKS Fargate. Differences are findings. |
@@ -118,7 +131,7 @@ Each experiment has a pass condition, evidence, and a control showing it could f
 | E1 | Does the R2 lifecycle work on Fargate? | Run the R2 `test-k8s` suite against EKS, unchanged except for configuration | Every test passes, or each difference is explained (for example cold-start timeouts or Fargate rejecting a field). HAPPY passes end to end with the callback over the VPC. |
 | E2 | Cold-start cost | 5 sequential and 3 concurrent executions | Record create → `Running` → first callback (p50 and max). No pass threshold; the numbers inform the decision. |
 | E3 | Separate kernels | Two concurrent `inspect` executions report `/proc/sys/kernel/random/boot_id` and `uname -r` | The boot IDs differ (evidence of separate kernels). This is not proof of the isolation's strength. |
-| E4 | Egress, by layer | From an execution Pod, probe:<br>• the trusted host :8000 (positive control);<br>• the trusted host on another port;<br>• the internet by IP and by name;<br>• `169.254.169.254` and `169.254.170.2`;<br>• another execution Pod's IP;<br>• the Kubernetes API private endpoint;<br>• the ECR API without credentials;<br>• S3 `PutObject` to a canary bucket outside the endpoint policy.<br>Each probe records: connection refused, timed out, or completed, and the HTTP status. | Only the positive control and the documented required paths connect. The API server, if reachable, answers 401 (recorded as exposure). The S3 put is denied by the endpoint policy. The internet is unreachable. |
+| E4 | Egress, by layer | From an execution Pod, probe:<br>• the gateway through the PrivateLink endpoint (positive control);<br>• the trusted host's private and public IPs directly, on :8000 and other ports;<br>• anything in `10.20.0.0/16`;<br>• the internet by IP and by name;<br>• `169.254.169.254` and `169.254.170.2`;<br>• another execution Pod's IP;<br>• the Kubernetes API private endpoint;<br>• the ECR API without credentials;<br>• S3 `PutObject` to a canary bucket outside the endpoint policy.<br>Each probe records: connection refused, timed out, or completed, and the HTTP status. | Only the positive control and the documented required paths connect. The API server, if reachable, answers 401 (recorded as exposure). The S3 put is denied by the endpoint policy. The internet is unreachable. |
 | E5 | Test the tests | Remove the `SecurityGroupPolicy` (with routing still blocking), then re-run E4. Separately, add a temporary route and repeat with the security group in place. | The probes that change identify which layer enforced what. If no probe changes, a control is unproven. |
 | E6 | DNS exfiltration | Query `<random>.s1-canary.example` and an allowlisted AWS name. Test the test: detach the DNS Firewall association and repeat. | With the firewall, the canary query is logged with action `BLOCK`, and the AWS name resolves. Without it, the canary query reaches the resolver and is forwarded (logged `NXDOMAIN`). |
 | E7 | Identity and credentials (ID-8, ISO-1) | `inspect`: environment variable names, mounts, IMDS and credential endpoints, the projected-token claims, and whether the Pod execution role is obtainable | No AWS credentials are obtainable by any route. The token claims match R2. The environment allowlist holds, and Fargate's own differences are recorded. |
@@ -131,18 +144,19 @@ Each experiment has a pass condition, evidence, and a control showing it could f
 | Item | Estimate |
 |---|---|
 | EKS control plane | $0.10/h |
-| Two interface endpoints in one AZ | ~$0.02/h |
+| Three interface endpoints in one AZ (ECR ×2, gateway) | ~$0.03/h |
+| Internal NLB for the endpoint service | ~$0.023/h plus capacity units |
 | t3.small host plus public IPv4 | ~$0.026/h |
 | Fargate Pods, 0.25 vCPU and 0.5 GB | ~$0.012/h each while running |
 | DNS Firewall and query logging | cents |
-| **Total** | **about $0.15–0.20/h while up** |
+| **Total** | **about $0.20–0.25/h while up** |
 
 A three-hour session costs under $1.
 
 **Teardown:**
 
 - `make s1-up` / `make s1-down`;
-- `make s1-leftovers` lists anything tagged `experiment=s1`, plus EKS clusters, ENIs, endpoints, EIPs, log groups, and Resolver configurations in us-east-2.
+- `make s1-leftovers` lists anything tagged `experiment=s1`, plus EKS clusters, VPCs, ENIs, endpoints, endpoint services, load balancers, EIPs, log groups, and Resolver configurations in us-east-2.
 - Nothing is left running between sessions. A Budgets alert already exists ($1–$50).
 
 **Safety:**
@@ -171,6 +185,6 @@ E2's numbers are judged by the user against the product need.
 
 ## 7. Open questions
 
-1. Is the S1-D6 public endpoint acceptable for a lab, or is private-only with admin through the host preferred?
+1. Is the S1-D6 public endpoint (IAM-authenticated, CIDR-restricted) acceptable, given that the private-only alternative needs peering?
 2. Should E1 run the whole R2 suite, which costs time, or a named subset?
 3. CloudWatch log retention for query logs: 1 day is proposed.
