@@ -1,6 +1,6 @@
 resource "aws_route53_resolver_firewall_domain_list" "allow" {
   name = "lab-s1-required-aws-names"
-  domains = [
+  domains = [for domain in [
     "api.ecr.us-east-2.amazonaws.com",
     "ecr.us-east-2.amazonaws.com",
     "729608197929.dkr.ecr.us-east-2.amazonaws.com",
@@ -10,11 +10,11 @@ resource "aws_route53_resolver_firewall_domain_list" "allow" {
     "prod-us-east-2-starport-layer-bucket.s3.us-east-2.amazonaws.com",
     "prod-us-east-2-starport-layer-bucket.s3.amazonaws.com",
     trimsuffix(trimprefix(aws_eks_cluster.execution.endpoint, "https://"), "/"),
-  ]
+  ] : "${lower(trimsuffix(domain, "."))}."]
 }
 resource "aws_route53_resolver_firewall_domain_list" "block" {
   name    = "lab-s1-block-everything-else"
-  domains = ["*"]
+  domains = ["*."]
 }
 resource "aws_route53_resolver_firewall_rule_group" "execution" {
   name = "lab-s1-execution"

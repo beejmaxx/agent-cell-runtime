@@ -67,6 +67,10 @@ resource "aws_instance" "host" {
   iam_instance_profile        = aws_iam_instance_profile.host.name
   user_data                   = file("${path.module}/host-init.sh")
   user_data_replace_on_change = true
+  lifecycle {
+    # EC2 reports the separately managed EIP as a public-IP association after launch.
+    ignore_changes = [associate_public_ip_address]
+  }
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"

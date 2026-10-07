@@ -340,11 +340,18 @@ cluster group ID even when it lacks experiment tags.
 ### Provisioning corrections observed during retry (2026-10-08)
 
 - Route 53 Resolver rejected VPC firewall association priority `100` as
-  reserved (`RSLVR-02017`). Use `101`, within the documented exclusive range
-  above 100 and below 9900. This is the only rule-group association, so its
+  reserved (`RSLVR-02017`). Use `101`, as shown in the AWS API example. This is the only rule-group association, so its
   relative ordering and the ALLOW/BLOCK rules are unchanged.
 - Terraform AWS provider 6.67.0 ignored the `Unsuccessful` item returned by
   `AcceptVpcEndpointConnections` when the endpoint was still provisioning.
   After confirming CloudTrail’s `Unavailable` response, retrying acceptance
   for only the Terraform-created endpoint succeeded. This retains the approved
   account principal and exact-endpoint acceptance gate.
+
+- The follow-up plan also exposed EC2 refresh drift: after EIP association,
+  `associate_public_ip_address` reads true even though automatic assignment
+  was disabled at launch. Ignore subsequent drift only for that launch flag;
+  the separately managed EIP association remains authoritative. This prevents
+  replacing the trusted host during unrelated experiment adjustments.
+- DNS Firewall returns lowercase, trailing-dot domain names. Normalize the
+  configured names to that representation to avoid repeated no-op updates.
