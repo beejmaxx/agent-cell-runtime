@@ -299,3 +299,20 @@ def test_ISO_1_controller_tokens_never_assume_harness(monkeypatch, tmp_path, rol
         assert (tmp_path / "controller.token").stat().st_mode & 0o777 == 0o600
         assert "--role-arn" not in calls[-1]
     assert s1_host.HARNESS_ROLE in s1_host.harness_exec()["args"]
+
+
+def test_ISO_1_permissions_fixture_fails_closed(monkeypatch, tmp_path):
+    import k8s_support as support
+
+    monkeypatch.setattr(support, "PROFILE", "eks")
+    monkeypatch.setattr(support, "STATE", tmp_path)
+    monkeypatch.setattr(support, "kubectl", lambda *a: pytest.fail("Host cannot impersonate"))
+    with pytest.raises(FileNotFoundError):
+        support.agent_permissions()
+    path = tmp_path / "agent-permissions.txt"
+    path.write_text("Resources\n")
+    with pytest.raises(RuntimeError, match="empty or malformed"):
+        support.agent_permissions()
+    report = "Resources Non-Resource URLs Resource Names Verbs\nsecrets [] [] [get]\n"
+    path.write_text(report)
+    assert support.agent_permissions() == report

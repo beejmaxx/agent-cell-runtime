@@ -6,6 +6,7 @@ from conftest import cancel, create, get, reconcile, row
 from k8s_support import (
     admin_create,
     admin_pod,
+    agent_permissions,
     delete_pod,
     evidence,
     image_env_names,
@@ -363,14 +364,7 @@ def test_ISO_1_ISO_5_ID_8_intended_credentials_and_template(live):
     directory = STATE / "evidence"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "ISO-1-ID-8.json").write_text(json.dumps(result, indent=2))
-    permissions = kubectl(
-        "auth",
-        "can-i",
-        "--list",
-        "--as=system:serviceaccount:agent-exec:agent-exec",
-        "-n",
-        "agent-exec",
-    )
+    permissions = agent_permissions()
     (directory / "ISO-1-permissions.txt").write_text(permissions)
     for line in permissions.splitlines()[1:]:
         fields = line.split()

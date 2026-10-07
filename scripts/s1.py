@@ -361,10 +361,36 @@ def restore_fixture_binding(config):
     print("Operator restored the fixed workload-controller binding", flush=True)
 
 
+def prepare_permissions_fixture(config):
+    report = kubectl(
+        config,
+        "auth",
+        "can-i",
+        "--list",
+        "--as=system:serviceaccount:agent-exec:agent-exec",
+        "-n",
+        "agent-exec",
+    )
+    if not report.startswith("Resources") or len(report.splitlines()) < 2:
+        raise RuntimeError("Operator permissions report is empty or malformed")
+    (STATE / "agent-permissions.txt").write_text(report)
+    encoded = base64.b64encode(report.encode()).decode()
+    ssm(
+        config["host_instance_id"],
+        [
+            "printf %s "
+            + shlex.quote(encoded)
+            + " | base64 -d > /home/ubuntu/s1/.local/s1/agent-permissions.txt",
+            "chown ubuntu:ubuntu /home/ubuntu/s1/.local/s1/agent-permissions.txt",
+        ],
+    )
+
+
 def test():
     run_approved()
     state_guard()
     config = connection()
+    prepare_permissions_fixture(config)
     # Save the exit code before export, so failed E1 evidence remains available.
     command = "cd /home/ubuntu/s1; echo $$ > .local/s1/run.pid; K8S_PROFILE=eks uv run python -m scripts.k8s_preflight > .local/s1/e1.log 2>&1 && K8S_PROFILE=eks uv run pytest -m k8s -p scripts.s1_evidence --tb=short >> .local/s1/e1.log 2>&1; status=$?; rm -f .local/s1/run.pid; echo $status > .local/s1/e1.exit; exit 0"
     ssm(

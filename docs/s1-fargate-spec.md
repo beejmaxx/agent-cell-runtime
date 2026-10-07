@@ -372,3 +372,15 @@ runner polls for that fixed request, applies only the source-defined controller
 binding (never a supplied manifest), and removes the request. The harness waits
 for the exact original roleRef and subjects. No operator credentials enter the
 host, and no bind/escalate or cluster-scoped grant is added to the harness.
+
+
+### ISO-1 operator permissions fixture (2026-10-08)
+
+The reviewer approves the read-only service-account impersonation query as an
+operator fixture. Before E1, the local operator runs `kubectl auth can-i --list
+--as=system:serviceaccount:agent-exec:agent-exec -n agent-exec` and transfers only
+its text report to the trusted host. The harness fails on a missing or malformed
+report and applies the existing permissions assertions unchanged. No operator
+credentials or impersonation permissions are granted to the harness. Colima
+continues to query directly. The report is a setup-time permissions observation;
+E1 does not mutate this service account's grants.

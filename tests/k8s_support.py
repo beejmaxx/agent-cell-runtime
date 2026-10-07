@@ -323,3 +323,20 @@ def psa_control_namespace():
         yield namespace
     finally:
         kubectl("delete", "namespace", namespace, "--wait=true", "--timeout=60s")
+
+
+def agent_permissions():
+    if PROFILE == "eks":
+        # Impersonation stays with the operator; the host receives only this report.
+        report = (STATE / "agent-permissions.txt").read_text()
+        if not report.startswith("Resources") or len(report.splitlines()) < 2:
+            raise RuntimeError("Operator permissions report is empty or malformed")
+        return report
+    return kubectl(
+        "auth",
+        "can-i",
+        "--list",
+        "--as=system:serviceaccount:agent-exec:agent-exec",
+        "-n",
+        "agent-exec",
+    )
