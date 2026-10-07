@@ -2,10 +2,16 @@
 
 **Status:** approved for implementation (2026-10-07), after a ChatGPT review whose amendments are merged here. D6 reverses an accepted R1 limitation.
 
+**Narrowed the same day,** after [threat-model revision 1](threat-model.md) put guest compromise in scope:
+
+- R2 proves the controller's behavior against a **real Kubernetes API server.** It makes **no isolation claims.** These are upstream API and kubelet behaviors that carry over to EKS. The local cluster is only a free, fast API server.
+- **Moved to the substrate decision** (the execution substrate, for example EKS Fargate, is not chosen yet), because on a laptop VM they would describe the laptop: ISO-6 (fresh filesystem), ISO-7 (a) through (d) (CPU throttling, OOM, disk eviction, containment), and ISO-9.
+- The capacity limit and the quota backstop stay, because they are controller and API behavior.
+
 R2 replaces R1's in-memory workload backend with real Pods on the local k3s cluster, behind the same `WorkloadBackend` contract. It implements the R2 scope in [invariants.md](invariants.md):
 
 - **Lifecycle:** LC-3, LC-5, LC-6, LC-7, LC-8 (R2 part), LC-11.
-- **Isolation:** ISO-1, ISO-5, ISO-6, ISO-7.
+- **API-level controls:** ISO-1 (token claims), ISO-5 (admission and template), the capacity limit and the quota backstop (from ISO-7).
 - **Identity:** ID-8 (R2 part).
 - **The mandatory happy path.**
 
@@ -14,7 +20,7 @@ Design rationale is in [execution-lifecycle.md](execution-lifecycle.md) and [tru
 **The evidence R2 must produce:**
 
 - The R1 reconciler, with the few changes in §6, keeps its lifecycle invariants when the backend is a real, slow, partially failing Kubernetes API.
-- An execution Pod receives no credentials the runtime did not intend to give it.
+- An execution Pod receives no credentials the runtime did not intend to give it (as admitted by the API and observed in the Pod; not an isolation claim).
 
 **Not in R2:**
 
@@ -45,11 +51,7 @@ Design rationale is in [execution-lifecycle.md](execution-lifecycle.md) and [tru
 
 **Observation (unverified as policy):** anything in the VM, including `rook-dev` Pods, can likely reach every service bound to the Mac's loopback through `192.168.5.2`, including Mock Workday on 18080 and the runtime API. R2 makes no isolation claim about this. R3 adds network enforcement.
 
-**Unverified, to check first (§9, preflight):**
-
-- cgroup v2 CPU controls (`cpu.max`, `cpu.stat`) are visible inside the container;
-- the kubelet enforces emptyDir `sizeLimit` and `ephemeral-storage` limits under the Docker runtime (through cri-dockerd);
-- a projected service-account token with a custom audience and Pod binding is issued.
+**Unverified, to check first (§9, preflight):** a projected service-account token with a custom audience and Pod binding is issued.
 
 If a mechanism is not enforced on this cluster, **stop and report the evidence gap.** Do not weaken or skip the test, and do not claim §10 is met. The user then chooses an environment fix or an explicit, scoped deferral.
 
@@ -286,11 +288,6 @@ The 30 s bound means an adoption delayed longer than that can make a recoverable
 | `exit` | Exits with `input.code` without completing |
 | `sleep` | Sleeps `input.seconds`, then completes. With no value, it sleeps forever. |
 | `inspect` | Completes with facts:<br>• the default token directory `/var/run/secrets/kubernetes.io/serviceaccount` exists or not;<br>• the projected token's claims, decoded without verification: `aud`, `exp - iat`, `sub`, and the bound Pod name and UID;<br>• env var **names**;<br>• the HTTP status of `GET https://kubernetes.default.svc/api` with the projected token, verifying TLS with the projected `ca.crt`;<br>• its uid and gid;<br>• the errno of writing `/rootfs-probe/x`;<br>• its effective capabilities (`CapEff` from `/proc/self/status`);<br>• its mount points (from `/proc/self/mounts`). |
-| `write_sentinel` / `check_sentinel` | Writes and reads back `/tmp/sentinel` / reports whether it exists |
-| `cpu_burn` | Reads `cpu.max` and `cpu.stat`, burns CPU for `input.seconds`, then completes with `cpu.max` and the **change** in `nr_throttled` and `throttled_usec` |
-| `oom` | Allocates past the memory limit |
-| `fill_disk` | Writes a **fixed** `input.mib` to `/tmp`, then sleeps until killed or until its deadline. It never writes without bound. |
-| `work` | Fixed CPU work, then completes with its start time, end time, and elapsed seconds |
 
 ## 8. Changes to R1 documents (in the same commit as the code)
 
@@ -312,7 +309,7 @@ The 30 s bound means an adoption delayed longer than that can make a recoverable
    - the pinned kubectl is 1.35.x;
    - namespaces carry the marker, and RBAC exists;
    - the agent image exists;
-   - inside a Pod: `cpu.max` and `cpu.stat` are readable, and a projected token with the gateway audience, an `exp`, and a Pod-UID claim is issued.
+   - inside a Pod: a projected token with the gateway audience, an `exp`, and a Pod-UID claim is issued.
 2. **`make test`** (no cluster) adds `KubernetesBackend` tests against `httpx.MockTransport`:
    - every row of the §5 table, including the unrecognized-404 case, the create catch-all, invalid Pods in `2xx` responses, and the UID precondition request;
    - Pod-template golden tests: every field in §4; no request input changes anything but `EXECUTION_INPUT_B64`; no `envFrom` and no Secret reference.
@@ -346,10 +343,11 @@ The 30 s bound means an adoption delayed longer than that can make a recoverable
 | LC-11 | A Pod-Security-compliant unlabeled Pod and a Pod labeled `owner=other` in `agent-exec` stay untouched. An owned-labeled `exec-<uuid>` with no record is deleted only after a successful DB lookup. With the DB unavailable: no deletes. Positive control: the controller *can* delete a Pod it owns.<br>**UID precondition, real mechanism:** observe Pod N with UID A; the admin replaces it with UID B; the backend deletes N with precondition A → `409`, and B remains. |
 | ISO-1 | `inspect`: the default token directory is absent; the Pod spec *requests* a 600 s token, and the observed token has an `exp` (it expires) and `aud == ["agent-cell-gateway"]`, `sub == system:serviceaccount:agent-exec:agent-exec`, and a Pod UID claim equal to the UID the harness observed; over verified TLS, the Kubernetes API rejects it (`401`). The actual lifetime (`exp - iat`) is recorded, not asserted: `expirationSeconds` is a request, and the issuer may return a different lifetime.<br>**Claimed evidence:** "the token carries the intended claims and Pod binding, and the Kubernetes API rejects it." Proving rejection *because of* audience is R3 (TokenReview).<br>**Admin checks:** `kubectl auth can-i --list --as=system:serviceaccount:agent-exec:agent-exec -n agent-exec` shows only the built-in self-review and discovery permissions. |
 | ISO-5 | **Admission:** each negative manifest is the real template with exactly one change, otherwise API-valid, created with the controller's token as a **server-side dry-run** (nothing persists even if admission were broken). Changes: `privileged: true` with `allowPrivilegeEscalation: true`, `hostNetwork`, `hostPID`, `hostIPC`, a `hostPath` volume, `hostPort`, added capability `NET_ADMIN`, `runAsUser: 0`. Each returns `403` with a message naming PodSecurity and the specific violation, not RBAC or quota.<br>**Test the test:** the same manifests pass admin dry-run in a temporary namespace without Pod Security labels, which proves they are otherwise valid. On a cluster where another admission control also rejects one, report "positive control unavailable: blocked by another control" for that case; it is not a Pod Security failure. The real template passes dry-run with the controller's token.<br>**Read-only root:** `inspect` shows writing `/rootfs-probe/x` fails with `EROFS`. Control: an admin-created Pod from the same image with only `readOnlyRootFilesystem: false` writes and reads it back.<br>**Template:** uid 65532 and an empty `CapEff`. |
-| ISO-6 | Execution A runs `write_sentinel` and proves it read the sentinel back. Execution B runs `check_sentinel` and reports it absent. (The cluster has one node, so both ran on it.) |
-| ISO-7 | (a) `cpu_burn` reports `cpu.max` equal to the 250m limit (`25000 100000`), and an **increase** in `nr_throttled` during the burn.<br>(b) `oom` → the agent container's `state.terminated.reason == OOMKilled` → `FAILED (EXITED_WITHOUT_COMPLETION)`.<br>(c) `fill_disk` with a fixed 48 MiB (above the 32 MiB emptyDir limit, below the 64 Mi container limit) → evicted, with an eviction message citing the emptyDir limit, and the node shows no `DiskPressure` → `FAILED`.<br>(d) **Containment:** `work` alone gives a baseline. Then a `cpu_burn` runs for longer than the whole measurement, with its running state verified before `work` starts and after it ends, and `work` runs again. The contended time must be at most 2 × baseline + 2 s, and the node stays `Ready`. Measured numbers are recorded in [experiments.md](experiments.md). (OOM is tested in (b), not here: a Pod that dies first exercises no contention.)<br>(e) With `MAX_ACTIVE_EXECUTIONS=2`, a third execution stays PENDING until one finishes.<br>(f) The quota backstop: a direct create beyond the quota → `CreateRejected`, with a message naming quota. |
+| Capacity (from ISO-7) | (e) With `MAX_ACTIVE_EXECUTIONS=2`, a third execution stays PENDING until one finishes.<br>(f) The quota backstop: a direct create beyond the quota → `CreateRejected`, with a message naming quota. |
 | ID-8 | The claim is "no unintended credentials were injected," not "no secret exists anywhere."<br>**Admitted Pod spec:**<br>• only the `tmp` and `agent-cell` volumes;<br>• no Secret references;<br>• no `envFrom`;<br>• env names exactly `EXECUTION_ID`, `EXECUTION_INPUT_B64`, `EXECUTION_CREDENTIAL`, `RUNTIME_URL`.<br>**In the Pod (`inspect`):**<br>• env names are those four, plus the image's baseline names taken from `docker image inspect`, plus the kubelet's `KUBERNETES_SERVICE_*` and `KUBERNETES_PORT*` (an address, injected despite `enableServiceLinks: false`);<br>• mounts include no default service-account token. |
 | Controller RBAC | **Real calls with the controller's token:**<br>• `GET` a Pod in `agent-exec` → authorized (`200`, or `404` for a missing name);<br>• `GET` a Secret in `agent-exec` → `403` (RBAC denies before any existence check);<br>• `POST` a Pod in `rook-dev` with `dryRun=All` → `403`.<br>**Then `SelfSubjectAccessReview`** for the full list: allowed `create`, `get`, `list`, `delete` on Pods in `agent-exec`. Denied:<br>• Secrets, `pods/exec`, `pods/log`, `update` and `patch` on Pods in `agent-exec`;<br>• Pods in `agent-runtime`, `default`, and `rook-dev`;<br>• cluster-scoped resources. |
+
+**Not built in R2:** fake-agent behaviors that only the moved isolation tests need (sentinels, CPU burn, OOM, disk fill, timed work). Remove them if already written.
 
 **Timing:** the k8s suite may take a few minutes (LC-8 waits about 35 s). Tests poll with timeouts, never fixed sleeps longer than needed.
 
@@ -359,7 +357,6 @@ The 30 s bound means an adoption delayed longer than that can make a recoverable
   - Alternatively, a preflight evidence gap is reported, and the user explicitly approves a scoped deferral.
 - The README documents setup (`make k8s-tools agent-image k8s-up`), the token refresh, and teardown.
 - There is no NetworkPolicy, gateway, AWS, or EKS code.
-- ISO-7 containment measurements are recorded in [experiments.md](experiments.md).
 
 ## 11. Open questions (not blocking R2)
 
