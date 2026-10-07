@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-runtime
+  labels:
+    lab.agent-runtime/owned: "true"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-exec
+  labels:
+    lab.agent-runtime/owned: "true"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35

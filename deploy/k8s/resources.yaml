@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-runtime-controller
+  namespace: agent-runtime
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-exec
+  namespace: agent-exec
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workload-controller
+  namespace: agent-exec
+rules:
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [create, get, list, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: workload-controller
+  namespace: agent-exec
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workload-controller
+subjects:
+- kind: ServiceAccount
+  name: agent-runtime-controller
+  namespace: agent-runtime
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: executions
+  namespace: agent-exec
+spec:
+  hard:
+    pods: "4"
+    requests.cpu: 500m
+    limits.cpu: "1"
+    requests.memory: 384Mi
+    limits.memory: 640Mi
+    limits.ephemeral-storage: 320Mi
