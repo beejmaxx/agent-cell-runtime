@@ -3,7 +3,7 @@ from uuid import uuid4
 
 import jwt
 import pytest
-from conftest import cancel, create, get
+from conftest import cancel, create, get, row
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import func, select
 
@@ -102,17 +102,42 @@ def test_ID_11_tenant_principal_routes_and_replay(env):
     bob_grant = env.issuer.grant("bob")
     bob_response = create(env, token=bob_token, grant=bob_grant, key="shared")
     assert bob_response.status_code == 201
-    assert len({alice, dave, bob_response.json()["id"]}) == 3
-    for token, target in ((bob_token, alice), (dave_token, alice), (env.token, dave)):
+    globex_alice_token = env.issuer.token("alice", "globex")
+    # Identical sub, key, and body isolate the tenant component of idempotency.
+    globex_alice_grant = env.issuer.grant("alice", "globex", id=env.grant["id"])
+    globex_alice_response = create(
+        env, token=globex_alice_token, grant=globex_alice_grant, key="shared"
+    )
+    assert globex_alice_response.status_code == 201
+    globex_alice = globex_alice_response.json()["id"]
+    assert "Idempotent-Replay" not in globex_alice_response.headers
+    assert len({alice, dave, bob_response.json()["id"], globex_alice}) == 4
+    for token, target in (
+        (bob_token, alice),
+        (dave_token, alice),
+        (env.token, dave),
+        (globex_alice_token, alice),
+        (env.token, globex_alice),
+    ):
         assert get(env, target, token).status_code == 404
         assert cancel(env, target, token).status_code == 404
-    for token, target in ((env.token, alice), (dave_token, dave)):
+    for token, target in (
+        (env.token, alice),
+        (dave_token, dave),
+        (globex_alice_token, globex_alice),
+    ):
+        assert row(env, target)["status"] == "PENDING"
         assert get(env, target, token).status_code == 200
         assert cancel(env, target, token).status_code == 200
     assert create(env, token=dave_token, grant=dave_grant, key="shared").json()["id"] == dave
     assert (
         create(env, token=bob_token, grant=bob_grant, key="shared").json()["id"]
         == bob_response.json()["id"]
+    )
+    assert create(env, key="shared").json()["id"] == alice
+    assert (
+        create(env, token=globex_alice_token, grant=globex_alice_grant, key="shared").json()["id"]
+        == globex_alice
     )
     assert get(env, str(uuid4())).status_code == 404
 
