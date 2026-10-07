@@ -894,3 +894,45 @@ warning). Kubernetes and integration tests were not run. `uv run ruff check
  tests/test_k8s.py`, Ruff formatting, and `git diff --check` passed. Raw unit
 output: `.local/s1/lc8-local-followup-unit.log`. No runtime source changed;
 no AWS calls, cluster startup, or push were performed.
+
+## 2026-10-08 — Trusted-side deadline and credential expiry fix
+
+The reviewer-approved rules close the completion-specific coverage gap recorded
+above. The handler locks the row, checks deadline_at after lock waits, and
+includes the deadline predicate in the SUCCEEDED update in the same transaction.
+Production uses PostgreSQL clock_timestamp(), which advances within transactions.
+A passed database deadline returns 409 DEADLINE_EXCEEDED without mutation or
+cleanup, including for receipt replays.
+
+The existing opaque completion credential and SHA-256 hash format are unchanged.
+The claim transaction now stores credential_expires_at equal to deadline_at.
+Credential lookup checks expiry before execution status and independently of
+reconciliation, returning 401 CREDENTIAL_EXPIRED at/after expiry. Thus ordinary
+late requests hit credential expiry first; separate tests shorten the database
+deadline to exercise its independent guard. Zero skew is intentional: the server
+compares its own clock with a time it stored. This replaces the earlier proposed
+embedded expiry/database-independent check; lookup still requires the database.
+Plain schema.sql adds the column idempotently; legacy credentials with no expiry
+fail closed. Adoption preserves the stored hash and expiry.
+
+Verified locally, 2026-10-07 22:39–22:41 UTC (2026-10-08 local):
+
+- `make test`: **247 passed, 22 deselected**, 42.62 s. LC-8/ID-10 tests prove
+  just-before acceptance, at/after rejection without reconciliation, expired
+  credentials with a still-RUNNING row and a future execution deadline, status-
+  independent expiry, row-lock waits, and a real-clock stall before UPDATE.
+  The existing-schema upgrade and adoption tests also pass.
+- `make test-integration`: **4 passed, 265 deselected**, 3.99 s, against local
+  Mock Workday HTTP. The fixture advanced its admin clock and never reset it.
+- `uv run ruff check src tests`, `uv run ruff format --check src tests`, and
+  `git diff --check` passed. Both pytest runs emitted the existing Starlette
+  TestClient/httpx deprecation warning.
+
+Raw output: `.local/s1/expiry-unit.log`, `.local/s1/expiry-integration.log`.
+Fixture lifecycle evidence: `.local/s1/expiry-builder.log`,
+`.local/s1/expiry-mock-workday-up.log`, `.local/s1/expiry-mock-workday-stop.log`,
+and `.local/s1/expiry-builder-stop.log`. The Docker-only s1-builder fixture was
+stopped after testing, preserving synthetic service data. No AWS operation or
+Kubernetes startup was performed. **LC-8 still requires re-verification on the
+next approved EKS run**; these local results are not an EKS pass. The kubelet
+backstop timing and startup-latency overrun remain as documented above.

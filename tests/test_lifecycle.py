@@ -144,6 +144,7 @@ def test_LC_3b_LC_5_LC_10_adopt_and_complete_with_persisted_credential(env, cras
     record = row(env, execution_id)
     assert record["status"] == "RUNNING" and record["workload_uid"]
     assert record["credential_hash"] is not None
+    assert record["credential_expires_at"] == record["deadline_at"]
     assert len(env.backend.list_owned()) == 1
     assert env.backend.create_calls == 1
     assert complete(env, execution_id).status_code == 200
@@ -417,6 +418,7 @@ def test_LC_1_cancel_during_backend_create_blocks_stale_running_write(env, monke
     assert record["status"] == "CANCELLED"
     assert record["workload_uid"] is None
     assert record["credential_hash"] is not None
+    assert record["credential_expires_at"] == record["deadline_at"]
     assert env.backend.create_calls == 1
     reconcile(env)
     assert env.backend.get(f"exec-{execution_id}") is None

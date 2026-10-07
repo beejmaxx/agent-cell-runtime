@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS executions (
     launch_attempted_at timestamptz,
     deadline_at timestamptz NOT NULL,
     credential_hash text,
+    credential_expires_at timestamptz,
     result jsonb,
     result_hash text,
     created_at timestamptz NOT NULL,
@@ -47,3 +48,6 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
     created_at timestamptz NOT NULL,
     PRIMARY KEY (tenant_id, principal_account_id, idem_key)
 );
+
+-- Existing credentials without an expiry fail closed until a new execution is issued.
+ALTER TABLE executions ADD COLUMN IF NOT EXISTS credential_expires_at timestamptz;

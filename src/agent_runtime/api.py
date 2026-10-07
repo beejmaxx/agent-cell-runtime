@@ -117,7 +117,11 @@ def complete(request: Request, execution_id: UUID, body: CompleteBody):
         row = None
         for tenant_id in conn.execute(select(s.db.tenants.c.id)).scalars().all():
             row = (
-                conn.execute(select(e).where(e.c.tenant_id == tenant_id, e.c.id == execution_id))
+                conn.execute(
+                    select(e)
+                    .where(e.c.tenant_id == tenant_id, e.c.id == execution_id)
+                    .with_for_update()
+                )
                 .mappings()
                 .first()
             )
@@ -129,6 +133,12 @@ def complete(request: Request, execution_id: UUID, body: CompleteBody):
             or not hmac.compare_digest(row["credential_hash"], credential_hash)
         ):
             raise APIError(401, "UNAUTHORIZED", "Invalid execution credential")
+        # Sample after acquiring the row lock, including time spent waiting for it.
+        now = conn.scalar(select(s.clock.sql_now()))
+        if row["credential_expires_at"] is None or now >= row["credential_expires_at"]:
+            raise APIError(401, "CREDENTIAL_EXPIRED", "Execution credential has expired")
+        if now >= row["deadline_at"]:
+            raise APIError(409, "DEADLINE_EXCEEDED", "Execution deadline has passed")
         result_hash = digest(body.result)
         if row["status"] == "RUNNING":
             changed = transition(
@@ -136,13 +146,13 @@ def complete(request: Request, execution_id: UUID, body: CompleteBody):
                 conn,
                 row,
                 "SUCCEEDED",
-                s.clock.now(),
+                s.clock.sql_now(),
                 result=body.result,
                 result_hash=result_hash,
             )
-            row = changed or owned(
-                s.db, conn, row["tenant_id"], row["principal_account_id"], execution_id
-            )
+            if changed is None:
+                raise APIError(409, "DEADLINE_EXCEEDED", "Execution deadline has passed")
+            row = changed
         if row["status"] != "SUCCEEDED":
             raise APIError(409, "INVALID_STATE", "Execution is not running")
         if row["result_hash"] != result_hash:

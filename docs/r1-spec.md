@@ -80,6 +80,7 @@ executions(
   launch_attempted_at timestamptz null,
   deadline_at timestamptz,
   credential_hash text null,         -- per-execution completion credential (§6)
+  credential_expires_at timestamptz null, -- S1: deadline at issuance, zero skew
   result jsonb null, result_hash text null,
   created_at, finished_at null)
 idempotency_records(
@@ -140,6 +141,7 @@ idempotency_records(
 ## 6. Completion (LC-9)
 
 - **Launch credential:** when the reconciler claims a launch, it generates a random per-execution credential and stores its SHA-256 hash atomically with `PENDING → PROVISIONING`, before create (R2 D6); it passes the plaintext to the backend as part of the workload spec. This stands in for R3's projected token.
+- **S1 expiry/deadline amendment:** persist `credential_expires_at = deadline_at` with the hash at claim, retaining both on adoption. Credential lookup rejects missing or expired expiry (401 `CREDENTIAL_EXPIRED`) regardless of status. After the row lock, use `clock_timestamp()` with zero skew; independently check the execution deadline (409 `DEADLINE_EXCEEDED`) and enforce it in the conditional success update in the same transaction. Both guards precede the status/replay table below; rejected requests cause no mutation or cleanup. See [S1's contract](s1-fargate-spec.md#trusted-side-completion-deadline-and-credential-expiry-2026-10-08).
 - **Request:** `POST /executions/{id}/complete` with `Authorization: Execution <credential>` and body `{"result": <JSON object, at most 64 KiB>}`. A bad or missing credential returns 401.
 - **Identity:** the completion route is the one route not authenticated by a user token. The execution credential identifies exactly one execution, and the tenant and principal come from that execution's record. A credential is valid only for the execution in the path.
 

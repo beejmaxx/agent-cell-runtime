@@ -75,6 +75,7 @@ class Reconciler:
                     now,
                     launch_attempted_at=now,
                     credential_hash=hashlib.sha256(credential.encode()).hexdigest(),
+                    credential_expires_at=row["deadline_at"],
                 )
                 if not claimed:
                     continue

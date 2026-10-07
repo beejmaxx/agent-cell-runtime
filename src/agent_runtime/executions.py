@@ -57,6 +57,7 @@ def transition(db, conn, row, status, now, **values):
                 e.c.principal_account_id == row["principal_account_id"],
                 e.c.id == row["id"],
                 e.c.status == row["status"],
+                *([e.c.deadline_at > now] if status == "SUCCEEDED" else []),
             )
             .values(status=status, **values)
             .returning(e)

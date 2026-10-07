@@ -412,14 +412,48 @@ kill-time guarantee under node failure. No universal startup bound is claimed.
 run. The historical failure remains recorded; this local test correction is
 not an EKS pass and changes no runtime behavior.
 
-**Trusted-side wall-clock coverage gap:** no existing test proves that a new
-completion is rejected at/after deadline_at with reconciliation stopped.
-`tests/test_lifecycle.py::test_LC_8_deadline_in_each_nonterminal_state` advances
-to the deadline and explicitly calls the reconciler; it does not prove the
-requested independent enforcement. The shared completion handler in
-`src/agent_runtime/api.py::complete` checks the credential hash and persisted
-status, without checking deadline_at. The R2 completion credential is an opaque
-secret with no independent expiry. The projected token's lifetime is not the
-completion credential's lifetime. Invariant ID-10 assigns gateway enforcement
-with the controller down to R3; it is not established by S1. No new runtime
-behavior is introduced in this follow-up.
+**Historical coverage gap at `53a8db6`:** completion checked the credential
+hash and status but neither deadline nor credential expiry. Tests only established
+timeout after explicit reconciliation. The following approved change closes the
+completion-specific gap; gateway operation authorization remains R3 scope.
+
+### Trusted-side completion deadline and credential expiry (2026-10-08)
+
+**Spec change, source: reviewer decisions on trusted-side enforcement and stored
+credential expiry.** Keep the existing opaque `token_urlsafe(32)` credential,
+SHA-256 hash, and `Authorization: Execution` format. When claiming the launch,
+store `credential_expires_at = deadline_at` alongside the hash in the same
+transaction. Adoption preserves both. No expiry is embedded in the credential
+and no new token system is introduced.
+
+Credential lookup checks expiry regardless of execution status or reconciler
+availability. After locking the execution row and authenticating the hash,
+sample PostgreSQL `clock_timestamp()`; at `now >= credential_expires_at`, reject
+with HTTP 401 `CREDENTIAL_EXPIRED`. A missing expiry also fails closed. There is
+**zero skew allowance**: the server compares its own clock with the time it
+stored. This check depends on the credential record in the database, but not on
+reconciliation or state-machine progress; it does not claim database-independent
+authentication. The plain, idempotent schema.sql adds the nullable column to
+existing tables. Previously issued credentials lacking expiry are rejected;
+new executions receive an expiry when claimed.
+
+Independently, the same transaction rejects a passed execution deadline with
+HTTP 409 `DEADLINE_EXCEEDED`. It samples time after any row-lock wait and retains
+`deadline_at > clock_timestamp()` in the conditional SUCCEEDED update, preventing
+a request checked before the deadline from transitioning after it. PostgreSQL's
+transaction-start timestamp is unsuitable because it does not advance during
+lock waits or transaction work. Only tests inject a fixed SQL clock.
+
+Both checks apply to receipt replays as well as new completions, superseding
+R1 §6's unconditional replay rule. Credential validation runs first, so normally
+(expiry equals deadline) a late request returns `CREDENTIAL_EXPIRED`; an earlier
+database deadline independently returns `DEADLINE_EXCEEDED`. Rejection performs
+no database mutation or workload cleanup. A stale RUNNING row remains unchanged
+until reconciliation transitions it to TIMED_OUT and cleans up.
+
+LC-8/ID-10 tests cover completion just before the deadline, rejection at/after
+it without reconciliation, expiry while the row remains RUNNING and its deadline
+is still future, terminal receipt replay, time spent waiting for a row lock,
+and a real-clock stall before the conditional update. These are the trusted-side
+wall-clock rules behind the kubelet backstop. **LC-8 still needs re-verification
+on the next EKS run**; this local change is not an EKS pass.
