@@ -61,7 +61,7 @@ make test-integration
 MW_BASE_URL=http://127.0.0.1:18080 make test-integration
 ```
 
-Integration tests use only Mock Workday's HTTP API: synthetic Alice/Bob/Dave logins, JWKS, and delegation grants. Requests bypass HTTP proxies and send the tenant's `Host` header. Grants created by the tests are revoked afterward; the tests do not reset the service. Because Mock Workday test-admin time is frozen, the integration runtime clock is set to the issued token's time. Both tenants' execution ownership and replay cases are covered by the self-contained suite; live tests use Acme's seeded `hr-assistant` client.
+Integration tests use only Mock Workday's HTTP API: synthetic Alice/Bob/Dave logins, JWKS, and delegation grants. Requests bypass HTTP proxies and send the tenant's `Host` header. Before each test's logins, the fixture advances the frozen test-admin clock by one hour through `http://127.0.0.1:8081/admin/clock`, so repeated runs do not exhaust the login rate limit. This local admin endpoint is required even when `MW_BASE_URL` is overridden. Grants created by the tests are revoked afterward; the tests do not reset the service. The integration runtime clock is set to the issued token's time. Both tenants' execution ownership and replay cases are covered by the self-contained suite; live tests use Acme's seeded `hr-assistant` client.
 
 To run the API against an existing local runtime database:
 

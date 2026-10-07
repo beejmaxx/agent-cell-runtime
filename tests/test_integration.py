@@ -23,6 +23,14 @@ def live(db):
     base_url = os.getenv("MW_BASE_URL", "http://127.0.0.1:18080")
     seed(db, base_url)
     grants = []
+    # Frozen test-admin time keeps repeated logins in the same rate-limit window.
+    response = httpx.post(
+        "http://127.0.0.1:8081/admin/clock",
+        json={"advance_seconds": 3600},
+        trust_env=False,
+        timeout=5,
+    )
+    response.raise_for_status()
     with httpx.Client(base_url=base_url, trust_env=False, timeout=5) as http:
         tokens = {}
         for name, tenant in (("alice", "acme"), ("bob", "acme"), ("dave", "globex")):
