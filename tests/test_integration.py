@@ -62,7 +62,6 @@ def live(db):
         app = create_app(db=db, mw=mw, clock=clock, backend=backend, reconcile=False)
         with TestClient(app) as client:
             initial = grant()
-            clock.set(clock.now())
             yield SimpleNamespace(
                 db=db,
                 app=app,
@@ -144,5 +143,7 @@ def test_ID_11_live_denies_other_principals(live):
         assert control.status_code == 200
         assert get(live, alice, live.tokens[name]).status_code == 404
         assert cancel(live, alice, live.tokens[name]).status_code == 404
-    assert get(live, alice).status_code == 200
+    owner_view = get(live, alice)
+    assert owner_view.status_code == 200
+    assert owner_view.json()["status"] == "PENDING"
     assert cancel(live, alice).status_code == 200
