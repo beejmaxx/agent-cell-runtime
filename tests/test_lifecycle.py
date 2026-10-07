@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Barrier, Event
+from time import monotonic, sleep
 from uuid import uuid4
 
 import pytest
 from conftest import cancel, complete, create, get, reconcile, row, running
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import OperationalError
 
 from agent_runtime.executions import TERMINAL, transition
@@ -261,6 +262,7 @@ def test_LC_1_LC_9_controlled_interleavings_atomic_result(env, winner):
     execution_id = running(env)
     record = row(env, execution_id)
     attempting = Event()
+    loser_pid = None
     with env.db.engine.begin() as conn:
         values = {"result": {"ok": True}, "result_hash": "test"} if winner == "SUCCEEDED" else {}
         assert transition(env.db, conn, record, winner, env.clock.now(), **values)
@@ -269,7 +271,9 @@ def test_LC_1_LC_9_controlled_interleavings_atomic_result(env, winner):
         assert row(env, execution_id)["result"] is None
 
         def loser():
+            nonlocal loser_pid
             with env.db.engine.begin() as other_conn:
+                loser_pid = other_conn.scalar(text("SELECT pg_backend_pid()"))
                 attempting.set()
                 return transition(
                     env.db,
@@ -286,8 +290,28 @@ def test_LC_1_LC_9_controlled_interleavings_atomic_result(env, winner):
 
         with ThreadPoolExecutor() as pool:
             future = pool.submit(loser)
-            assert attempting.wait(5)
-            conn.commit()
+            try:
+                assert attempting.wait(5)
+                # AUTOCOMMIT avoids retaining a stale statistics snapshot while polling.
+                with env.db.engine.connect().execution_options(
+                    isolation_level="AUTOCOMMIT"
+                ) as observer:
+                    until = monotonic() + 5
+                    while monotonic() < until:
+                        wait_type = observer.scalar(
+                            text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                            {"pid": loser_pid},
+                        )
+                        if wait_type == "Lock":
+                            break
+                        sleep(0.01)
+                    else:
+                        pytest.fail("Losing transition never blocked on the winner's lock")
+                conn.commit()
+            finally:
+                # Release the loser even when the lock-observation assertion fails.
+                if conn.in_transaction():
+                    conn.rollback()
             assert future.result(timeout=5) is None
     final = row(env, execution_id)
     assert final["status"] == winner
@@ -375,3 +399,26 @@ def test_LC_3_rejected_create_and_running_loss(env):
     assert row(env, active)["failure_reason"] == "POD_LOST"
     reconcile(env)
     assert env.backend.create_calls == calls
+
+
+def test_LC_1_cancel_during_backend_create_blocks_stale_running_write(env, monkeypatch):
+    execution_id = create(env).json()["id"]
+    original_create = env.backend.create
+
+    def cancel_during_create(name, spec):
+        assert row(env, execution_id)["status"] == "PROVISIONING"
+        assert cancel(env, execution_id).status_code == 200
+        uid = original_create(name, spec)
+        assert env.backend.get(name) is not None
+        return uid
+
+    monkeypatch.setattr(env.backend, "create", cancel_during_create)
+    reconcile(env)
+    record = row(env, execution_id)
+    assert record["status"] == "CANCELLED"
+    assert record["workload_uid"] is None
+    assert record["credential_hash"] is None
+    assert env.backend.create_calls == 1
+    reconcile(env)
+    assert env.backend.get(f"exec-{execution_id}") is None
+    assert env.backend.create_calls == 1
