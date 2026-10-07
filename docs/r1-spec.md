@@ -101,7 +101,7 @@ idempotency_records(
 | `POST /executions` | Creates an execution (§5). `Idempotency-Key` required. Returns 201 with the execution. |
 | `GET /executions/{id}` | The owner's view, including `result` |
 | `POST /executions/{id}/cancel` | Conditional transition from any non-terminal state to CANCELLED. Already CANCELLED: 200 with the same execution. Other terminal state: 409 `INVALID_STATE`. |
-| `POST /executions/{id}/complete` | Called by the workload, not the user (§6) |
+| `POST /executions/{id}/complete` | Called by the workload, not the user (§6). **Test-only stand-in:** removed when R3's gateway provides completion. |
 
 - **Execution shape:** `{id, agent, status, failure_reason, operations, input, deadline_at, created_at, finished_at, result}`.
 - **Errors** use Mock Workday's format: `{"error": {"code", "message", "request_id"}}`.
@@ -164,7 +164,8 @@ class WorkloadBackend(Protocol):
     def list_owned(self) -> list[Workload]: ...                    # runtime-labeled only
 ```
 
-- `Workload` has `name`, `uid`, and `phase` (`RUNNING`, `SUCCEEDED`, `FAILED`, or `LOST`).
+- `Workload` has `name`, `uid`, `phase` (`RUNNING`, `SUCCEEDED`, `FAILED`, or `LOST`), and `labels`.
+- Every workload the runtime creates carries the labels `owner=agent-runtime` and `execution_id=<id>`. Adoption and cleanup require both labels to match; a name collision alone is not enough.
 - **Errors:**
   - `BackendUnavailable`: cannot observe or act; never interpreted as absence.
   - `CreateRejected`: definite failure; the workload does not exist.
@@ -179,9 +180,12 @@ class WorkloadBackend(Protocol):
 - `exit(name, code)`: the workload ends without calling complete.
 - `remove(name)`: the workload vanishes externally.
 - `add_unowned(name)`: a workload without the runtime label.
+- `appear(name, labels)`: a workload becomes visible later, for example after a timed-out create actually completed.
 - `create_calls`: the count of create invocations.
 
 A fake workload does not execute code. Tests drive completion through the API using the credential from the spec the backend received.
+
+**Simulated controller restart:** a fresh reconciler (new process state, same database and the **same `FakeBackend` instance**). Backend state, including `create_calls`, must survive the restart, or restart tests prove nothing.
 
 ## 8. Reconciler
 
@@ -195,7 +199,7 @@ A fake workload does not execute code. Tests drive completion through the API us
      - `CreateRejected` → `FAILED (LAUNCH_FAILED)`;
      - `CreateOutcomeUnknown` or `BackendUnavailable` → stay PROVISIONING.
 2. **PROVISIONING** (launch already attempted): `get(name)`.
-   - Exists → adopt: record the uid and move to RUNNING. A credential that was never persisted means completion is impossible, so the execution will time out. That is acceptable, and the case is covered by the failpoint test.
+   - Exists with matching `owner` and `execution_id` labels → adopt: record the uid and move to RUNNING. A name match with wrong labels is never adopted; the execution fails as `LAUNCH_UNKNOWN`. A credential that was never persisted means completion is impossible, so the execution will time out. That is acceptable, and the case is covered by the failpoint test.
    - `None` → `FAILED (LAUNCH_UNKNOWN)`. **Never call `create` again for this execution.**
    - Unavailable → no change.
 3. **RUNNING:** `get(name)`.
@@ -203,7 +207,7 @@ A fake workload does not execute code. Tests drive completion through the API us
    - Phase SUCCEEDED or FAILED without a completion → `FAILED (EXITED_WITHOUT_COMPLETION)`.
    - Unavailable → no change.
 4. **Deadlines:** any non-terminal execution with `now >= deadline_at` → `TIMED_OUT`. This is database-only and applies even when the backend is unavailable (LC-7).
-5. **Cleanup:** terminal execution whose workload exists → `delete`. Failpoint **`before_cleanup`** sits between the terminal transition and cleanup in the cancel and complete paths.
+5. **Cleanup:** terminal execution whose workload exists with matching labels → `delete`. This includes a workload that becomes visible after the execution already failed (LC-3d); it never gains authority, because completion requires a RUNNING execution. Failpoint **`before_cleanup`** sits between the terminal transition and cleanup in the cancel and complete paths.
 6. **Orphans (part of LC-11 in R1):** only if the database query for executions succeeded in this pass. For each `list_owned()` workload with no execution row → `delete`. Unowned workloads are never touched. No grace period.
 
 - **Conditional transitions everywhere:** every transition is `UPDATE … WHERE id = :id AND status = :expected`. Zero rows updated means another transition won, and the reconciler moves on.
@@ -218,18 +222,20 @@ A fake workload does not execute code. Tests drive completion through the API us
 
 | ID | What to test |
 |---|---|
-| LC-1 | 50 iterations racing complete, cancel, and deadline with threads |
+| LC-1 | Controlled interleavings on separate database connections (plus a threaded race): exactly one committed terminal transition. Cancel and deadline during PENDING and PROVISIONING. A stale reconciler writing RUNNING after cancellation updates zero rows. |
 | LC-2 | Sequential replay and a different body; 20 concurrent identical requests → exactly one execution; the same key value under another principal → a separate execution |
-| LC-3 | Lost create response followed by `remove`, and `fail_next_create_without_creating` → `LAUNCH_UNKNOWN` with `create_calls == 1` |
+| LC-3 | (a) failpoint `after_claim` then restart: conservative failure, zero creates; (b) lost response, workload present → adopted; (c) lost response then `remove`, and `fail_next_create_without_creating` → `LAUNCH_UNKNOWN` with `create_calls == 1` across a simulated restart; (d) after `LAUNCH_UNKNOWN`, `appear` the workload → it is deleted, and completion with its credential is rejected |
 | LC-4 | Failpoint `after_claim`: no workload exists before the claim commit, and no create happens before it |
 | LC-5 | Lost create response while the workload exists → adopted, one workload, RUNNING |
 | LC-7 | Backend unavailable: no POD_LOST, no relaunch, no orphan deletion; cancel and deadline still apply |
 | LC-8 | An overdue execution in each non-terminal state becomes `TIMED_OUT` |
-| LC-9 | Exit without completing; replay of the same result; a different result; oversized and non-object results; bad credential |
+| LC-9 | Exit without completing; replay of the same result; a different result; oversized and non-object results; bad credential. Atomicity: never SUCCEEDED without its result; completion racing cancel leaves no stored result when cancel wins. |
 | LC-10 | Failpoints `after_claim`, `after_create`, and `before_cleanup` each converge |
 | ID-5 | Another user's valid grant in the same tenant → 403; the owner with the same grant → 201 |
 | ID-6 | Deadline beyond grant expiry → 422; an operation outside the grant's scopes → 403; a revoked or expired grant → 403; Mock Workday unreachable → 503 with nothing created |
-| ID-11 | Real executions owned by Alice (Acme) and Dave (Globex): cross-principal and cross-tenant GET and cancel → 404; the owner → 200 |
+| ID-11 | Real executions owned by Alice (Acme) and Dave (Globex): cross-principal and cross-tenant GET, cancel, and idempotent replay with the same key value → 404 or a separate execution, never the other's; the owner → 200 |
+| LC-11 | With the database unavailable, no deletes. Unowned workloads untouched. An owned workload with no record → deleted after a successful lookup. |
+| HAPPY | Create → provision → run → complete → GET returns the result → workload cleaned up |
 
 **Integration** (`make test-integration`, against Mock Workday at `MW_BASE_URL`, default `http://127.0.0.1:18080`, started with `MW_TEST_ADMIN=1` from the mock-workday repository): ID-5 and ID-6 with real grants created through Mock Workday's API; creating executions; cancel; complete. Requests to Mock Workday must bypass HTTP proxies (`Host` selects the tenant).
 
