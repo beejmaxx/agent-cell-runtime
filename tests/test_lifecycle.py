@@ -523,13 +523,17 @@ def test_LC_6_same_name_replacement_is_lost_and_deleted_by_its_uid(env, monkeypa
     assert env.backend.create_calls == 1
 
 
-def test_ISO_7_capacity_is_global_and_waiters_keep_deadlines(env):
+@pytest.mark.parametrize("second_state", ["RUNNING", "PROVISIONING"])
+def test_ISO_7_capacity_is_global_and_waiters_keep_deadlines(env, second_state):
     env.app.state.reconciler.max_active_executions = 2
     first = running(env)
     token = env.issuer.token("dave", "globex")
     grant = env.issuer.grant("dave", "globex")
     second = create(env, token=token, grant=grant).json()["id"]
+    if second_state == "PROVISIONING":
+        env.backend.lose_next_create_response()
     reconcile(env)
+    assert row(env, second)["status"] == second_state
     third = create(env).json()["id"]
     reconcile(env)
     assert row(env, second)["status"] == "RUNNING"
