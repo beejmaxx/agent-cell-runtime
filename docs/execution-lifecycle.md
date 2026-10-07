@@ -73,7 +73,7 @@ There is no persisted resource state machine: Pod existence is observed from Kub
 
 - Only Pods with the runtime's ownership labels are candidates.
 - Only after a *successful* database lookup, because a database outage must never look like "zero executions, delete everything."
-- Only after a short grace period.
+- No grace period: the record is always committed before the workload is created, so a labeled workload without a record cannot belong to an in-flight launch.
 
 **Deadlines are enforced twice:**
 

@@ -140,6 +140,7 @@ idempotency_records(
 
 - **Launch credential:** when the reconciler launches a workload, it generates a random per-execution credential, stores its SHA-256 hash, and passes the plaintext to the backend as part of the workload spec. This stands in for R3's projected token.
 - **Request:** `POST /executions/{id}/complete` with `Authorization: Execution <credential>` and body `{"result": <JSON object, at most 64 KiB>}`. A bad or missing credential returns 401.
+- **Identity:** the completion route is the one route not authenticated by a user token. The execution credential identifies exactly one execution, and the tenant and principal come from that execution's record. A credential is valid only for the execution in the path.
 
 **Transitions (conditional SQL):**
 

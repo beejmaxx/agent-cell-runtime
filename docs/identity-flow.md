@@ -26,7 +26,8 @@
    Alice → POST /executions {agent, grant: G-42, operations, input} → controller
    The controller:
      a. authenticates Alice (verifies Mock Workday's signature via JWKS);
-     b. exchanges G-42 once and checks the delegated token's subject == Alice
+     b. lists Alice's own grants from Mock Workday using her token, and requires
+        G-42 to be among them, active, and issued to the agent's client
         (stops anyone from using someone else's grant ID);
      c. checks the requested operations are within the grant's scopes, and
         that the execution deadline is no later than the grant's expiry;
