@@ -34,6 +34,8 @@ def test_LC_2_idempotency_sequential_and_concurrent(env):
     assert replay.headers["Idempotent-Replay"] == "true"
     assert create(env, key="same", input={"different": 1}).status_code == 422
     barrier = Barrier(20)
+    grant_calls = env.issuer.grant_calls
+    env.issuer.grant_delay = 0.1
 
     def submit(_):
         barrier.wait()
@@ -41,6 +43,8 @@ def test_LC_2_idempotency_sequential_and_concurrent(env):
 
     with ThreadPoolExecutor(max_workers=20) as pool:
         responses = list(pool.map(submit, range(20)))
+    env.issuer.grant_delay = 0
+    assert env.issuer.grant_calls == grant_calls + 1
     assert all(r.status_code == 201 for r in responses)
     assert len({r.json()["id"] for r in responses}) == 1
     assert sum("Idempotent-Replay" not in r.headers for r in responses) == 1

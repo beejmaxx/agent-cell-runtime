@@ -3,6 +3,7 @@ import shutil
 import socket
 import subprocess
 from datetime import UTC, datetime, timedelta
+from time import sleep
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -82,6 +83,7 @@ class Issuer:
         self.grant_lists = {}
         self.jwks_calls = 0
         self.grant_calls = 0
+        self.grant_delay = 0
         self.unavailable = False
         self.malformed = None
 
@@ -116,6 +118,7 @@ class Issuer:
             return httpx.Response(200, json={"keys": [{**key, "kid": self.kid, "alg": "RS256"}]})
         assert request.url.path == "/api/v1/delegation-grants"
         self.grant_calls += 1
+        sleep(self.grant_delay)
         if self.unavailable:
             raise httpx.ConnectError("offline", request=request)
         if self.malformed is not None:
