@@ -9,10 +9,13 @@ from the foundation/bootstrap directories as part of S1.
 
 ## Review before apply
 
-The first checkpoint-4 apply was blocked by PrivateLink rejecting the current
-operator ARN's `/managed/` IAM path. `s1-up` now rejects this configuration before
-AWS calls; a reviewed pathless operator design is required before retry. See
-`docs/experiments.md` for the attempt and cleanup evidence. The operator IP comes from
+The first checkpoint-4 apply was blocked by PrivateLink rejecting the operator
+ARN's `/managed/` IAM path. The reviewer approved this account's root ARN as the
+service principal, with acceptance required for only the Terraform-created
+endpoint ID. The operator identity remains unchanged; its path no longer blocks
+`s1-up`. Regenerate the saved plan before retrying; the original plan contains
+the rejected principal. See `docs/experiments.md` for the attempt and outstanding
+cleanup evidence. The operator IP comes from
 `curl --noproxy '*' https://checkip.amazonaws.com`, following Mock Workday's
 existing direct-egress detection. A changed IP requires a new plan.
 
@@ -44,8 +47,11 @@ adjustments described in the spec.
   Terraform owns their creation and deletion. The existing shared ELB
   service-linked role is not adopted or destroyed.
 - PrivateLink: internal NLB TCP 8001 in the trusted VPC, an endpoint service
-  permitting only the verified operator role with acceptance required, and
-  one interface endpoint in execution subnet 2a. The NLB skips ingress-SG
+  permitting only account `729608197929` (`arn:aws:iam::729608197929:root`, never
+  `*`) with acceptance required. The accepter names only the Terraform-created
+  interface endpoint in execution subnet 2a. Specific endpoint acceptance is the
+  gate in this single-account lab; separate accounts would name the consumer
+  account and retain explicit acceptance. The NLB skips ingress-SG
   evaluation for accepted PrivateLink traffic; it has no direct ingress rule.
   Its egress and the host's ingress allow only TCP 8001 between their groups.
 - Execution SG: callback 8001, AWS endpoint 443, S3 prefix-list 443, API 443;

@@ -447,3 +447,26 @@ Additional cleanup evidence: `.local/s1/checkpoint4-down-retry.log`,
 `cleanup-vpc-dependencies.json` (MCP credential failure),
 `cleanup-auth-error.log`, `checkpoint4-leftovers.log`,
 `checkpoint4-final-focused.log`, and `checkpoint4-handoff.txt`.
+
+### S1 PrivateLink reviewer correction — 2026-10-08
+
+The reviewer approved `arn:aws:iam::729608197929:root` as the sole endpoint
+service allowed principal, with `acceptance_required=true`. The existing
+accepter still accepts only the Terraform-created endpoint ID. In this
+single-account lab, account IAM controls who can request a connection and
+explicit acceptance of that endpoint gates the connection. The account-root
+ARN identifies account principals; it does not require root-user credentials.
+A deployment across separate accounts would name the consumer account instead.
+No wildcard principal or additional operator role was introduced.
+
+The obsolete operator-role-path pre-apply guard and its test were removed;
+the spec and operator instructions now reflect the approved design. Local
+validation: **14 focused tests passed**, Terraform fmt/validate, Ruff
+check/format, and `git diff --check` passed. Evidence:
+`.local/s1/privatelink-correction-tests.log` and
+`.local/s1/privatelink-correction-validate.log`.
+
+This correction has not been applied to AWS. The old saved plan must be
+regenerated before a retry. Expired credentials still block final cleanup
+verification, and the exact-issuer OIDC lookup denial remains unresolved;
+neither a clean inventory nor a successful PrivateLink connection is claimed.

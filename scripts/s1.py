@@ -297,11 +297,6 @@ def upload_source(config):
 
 def up():
     run_approved()
-    # PrivateLink rejects role ARNs with an IAM path even though IAM accepts them.
-    if "/" in OPERATOR.split(":role/", 1)[1]:
-        raise RuntimeError(
-            "PrivateLink rejects IAM role paths; review a pathless S1 operator before apply"
-        )
     state_guard()
     review = json.loads((STATE / "plan-review.json").read_text())
     if (

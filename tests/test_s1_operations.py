@@ -13,15 +13,6 @@ def test_ISO_1_no_mutation_before_checkpoint_4(monkeypatch, action):
         action()
 
 
-def test_ISO_2_privatelink_role_path_fails_before_aws(monkeypatch):
-    monkeypatch.setenv("S1_RUN_APPROVED", "1")
-    monkeypatch.setattr(
-        s1, "state_guard", lambda: pytest.fail("Touched AWS with invalid principal")
-    )
-    with pytest.raises(RuntimeError, match="PrivateLink rejects IAM role paths"):
-        s1.up()
-
-
 @pytest.mark.parametrize("key", ["dev/foundation.tfstate", "bootstrap.tfstate", s1.KEY])
 def test_ISO_1_teardown_state_isolation(monkeypatch, tmp_path, key):
     monkeypatch.setattr(s1, "TF", tmp_path)

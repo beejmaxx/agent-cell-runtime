@@ -126,7 +126,8 @@ resource "aws_lb_listener" "completion" {
 resource "aws_vpc_endpoint_service" "completion" {
   acceptance_required        = true
   network_load_balancer_arns = [aws_lb.completion.arn]
-  allowed_principals         = [var.operator_role_arn]
+  # IAM paths are unsupported here; acceptance below gates the exact S1 endpoint.
+  allowed_principals = ["arn:aws:iam::${local.account}:root"]
 }
 resource "aws_vpc_endpoint" "completion" {
   vpc_id              = aws_vpc.execution.id
