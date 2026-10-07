@@ -15,24 +15,41 @@ run:
 .PHONY: k8s-tools k8s-up k8s-token k8s-down agent-image
 
 k8s-tools:
-	uv run python scripts/k8s.py tools
+	uv run python -m scripts.k8s tools
 
 k8s-up:
-	uv run python scripts/k8s.py up
+	uv run python -m scripts.k8s up
 
 k8s-token:
-	uv run python scripts/k8s.py token
+	uv run python -m scripts.k8s token
 
 k8s-down:
-	uv run python scripts/k8s.py down
+	uv run python -m scripts.k8s down
 
 agent-image:
-	uv run python scripts/k8s.py image
+	uv run python -m scripts.k8s image
 
 .PHONY: k8s-preflight
 k8s-preflight:
-	uv run python scripts/k8s_preflight.py
+	uv run python -m scripts.k8s_preflight
 
 .PHONY: test-k8s
 test-k8s: k8s-preflight
 	uv run pytest -m k8s -x
+
+# Checkpoint 3: prepare and review the saved plan. Mutations require checkpoint 4 approval.
+.PHONY: s1-plan s1-up s1-test s1-down s1-leftovers
+s1-plan:
+	uv run python -m scripts.s1 plan
+
+s1-up:
+	uv run python -m scripts.s1 up
+
+s1-test:
+	uv run python -m scripts.s1 test
+
+s1-down:
+	uv run python -m scripts.s1 down
+
+s1-leftovers:
+	uv run python -m scripts.s1 leftovers

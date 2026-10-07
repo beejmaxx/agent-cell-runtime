@@ -146,6 +146,9 @@ def main():
         result = {"cross_execution": observation}
     else:
         raise SystemExit(1)
+    if behavior == "probe":
+        # E5 may block the callback itself; the trusted harness can still collect Pod logs.
+        print(json.dumps(result), flush=True)
     if data.get("hold_seconds"):
         time.sleep(data["hold_seconds"])
     complete(result)

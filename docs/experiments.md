@@ -248,3 +248,64 @@ formatting and `git diff --check` passed. Mock Workday was unavailable, so its
 four integration tests retain the earlier passing evidence, not a fresh run.
 Colima was not started. Live EKS role assumption, namespace authorization and
 Fargate lifecycle behavior remain unverified until E1. No AWS resources changed.
+
+## 2026-10-08 — S1 checkpoint 3 plan prepared; no apply
+
+Checkpoint 2's approved harness/control-namespace implementation is committed
+as `eac2101`. Colima stayed stopped throughout this continuation. The final
+`make test` run passed **180 tests, 22 deselected**, in 62.62 seconds: the
+169 checkpoint-2 unit tests plus 11 operator-workflow cases. The deselected
+set is 18 Kubernetes tests and four HTTP integration tests. Mock Workday is
+unavailable while its local container environment is stopped; the four HTTP
+tests retain the earlier passing evidence and were **not rerun**. This is not
+a fresh full non-Kubernetes integration result. Ruff check/format, shell syntax,
+`git diff --check`, `terraform fmt -check` and `terraform validate` passed.
+
+Terraform 1.16.4 with the signed, locked AWS provider 6.67.0 produced two saved
+plans, each **76 additions, zero changes, zero deletions**. A JSON comparison
+verified identical planned resource values except for the STS endpoint policy.
+The spec keeps STS but does not specify that policy; the review alternatives are
+`sts:GetCallerIdentity` only and the default full endpoint policy. Neither is
+selected for apply. The DNS block response is proposed as `BLOCK/NXDOMAIN`.
+
+The isolated backend is `beejmaxx-lab-tfstate-dev`, key
+`dev/experiments/s1-fargate.tfstate`. Planning only read the foundation's SSM
+network outputs; it did not modify foundation/bootstrap state, the state
+bucket configuration, or `mock-workday` ECR. The direct operator egress was
+verified without proxies as `120.229.48.82/32`. The provider pins account
+`729608197929` and Region `us-east-2`. All planned taggable resources carry
+`lab=agent-runtime`, `experiment=s1`.
+
+The plan includes the execution VPC/two private subnets, one EKS cluster and
+Fargate profile, required endpoints and restricted policies, DNS Firewall and
+query logs, the canary bucket and fake-agent repository, trusted EC2/EIP and
+PrivateLink/NLB, and the approved IAM/access entries. It has no IGW, NAT,
+peering, node group, IAM OIDC provider or Pod Identity association. The two
+required EKS/Fargate service-linked roles were verified absent, so Terraform
+owns their lifecycle; the existing shared ELB service-linked role is untouched.
+
+The Makefile/operator tooling guards the S1 state and saved plan, keeps operator
+credentials off the host, exports sanitized evidence, and orders teardown so
+Pods are gone before removing their API/network paths. Unit tests cover those
+boundaries, including an inventory authorization failure producing an incomplete
+result rather than a false clean inventory. Setup and teardown themselves have
+not run against AWS and remain checkpoint-4 validation, as do minimum Fargate
+SG/DNS dependencies, namespace-scoped harness authorization and E1-E10.
+
+Read-only inventory found no S1 resources in the network, compute, EKS, load
+balancer, DNS/logging, role/profile, canary or ECR checks. The **OIDC inventory
+was denied by project SCP `p-5fs30qru`**. E9 and a fully clean leftovers claim
+therefore need visibility restored or reviewer-agreed alternative evidence;
+absence from the Terraform plan alone does not prove absence in AWS. The spec's
+former broad statement that the Free-plan SCP "allows IAM" was too broad and
+now records the observed exception. The Free plan is active with $200 credits;
+a successful plan does not prove create permissions or quotas.
+
+Local evidence: `.local/s1/checkpoint3-final-unit.log`,
+`terraform-plan-identity.log`, `terraform-plan-default.log`,
+`plan-sts-{identity,default}.tfplan`, `plan-sts-{identity,default}.json`,
+`inputs-sts-{identity,default}.tfvars.json`, `plan-comparison.json`,
+`plan-review-sts-{identity,default}.json`, and `inventory-readonly.json`.
+See `infra/experiments/fargate/README.md` for the review and run workflow.
+No AWS resources were created or changed; no apply/destroy or local Kubernetes
+start occurred. Stop here for plan review before checkpoint 4.

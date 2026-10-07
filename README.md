@@ -171,6 +171,10 @@ The reviewer accepted the local Kubernetes timing failures as environmental;
 Colima stays stopped for this checkpoint. E1 on EKS supplies the live lifecycle
 evidence, including LC-8; no invariant or timeout was weakened.
 
+S1 provisioning, plan alternatives, run commands and teardown details are in
+[the experiment README](infra/experiments/fargate/README.md). Checkpoint 3 stops
+at the Terraform plan; no S1 resources have been applied.
+
 ## License
 
 [MIT](LICENSE)

@@ -10,9 +10,9 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
-from k8s import PROFILE, STATE, guard, image, kubectl, require_owned
 
 from agent_runtime.pod import pod_manifest
+from scripts.k8s import PROFILE, STATE, guard, image, kubectl, require_owned
 
 
 def run():
