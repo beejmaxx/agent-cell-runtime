@@ -356,7 +356,7 @@ def export_evidence(config):
     ssm(
         instance,
         [
-            "cd /home/ubuntu/s1; mkdir -p .local/s1/evidence .local/s1/preflight; tar czf /tmp/s1-evidence.tgz .local/s1/evidence .local/s1/preflight $(test ! -f .local/s1/e1.log || printf '.local/s1/e1.log')"
+            "cd /home/ubuntu/s1; install -d -o ubuntu -g ubuntu .local/s1/evidence .local/s1/preflight; tar czf /tmp/s1-evidence.tgz .local/s1/evidence .local/s1/preflight $(test ! -f .local/s1/e1.log || printf '.local/s1/e1.log')"
         ],
     )
     size = int(ssm(instance, ["stat -c %s /tmp/s1-evidence.tgz"]).strip())
