@@ -44,20 +44,18 @@ class Reconciler:
                 rows.extend(
                     conn.execute(
                         select(self.db.executions).where(
-                            self.db.executions.c.tenant_id == tenant_id
+                            self.db.executions.c.tenant_id == tenant_id,
+                            self.db.executions.c.status.not_in(TERMINAL),
                         )
                     )
                     .mappings()
                     .all()
                 )
         for row in rows:
-            if row["status"] not in TERMINAL and now >= row["deadline_at"]:
+            if now >= row["deadline_at"]:
                 changed = self.change(row, "TIMED_OUT", now)
                 if changed:
                     self.cleanup(changed)
-                continue
-            if row["status"] in TERMINAL:
-                self.cleanup(row)
                 continue
             if row["status"] == "PENDING":
                 claimed = self.change(row, "PROVISIONING", now, launch_attempted_at=now)
@@ -111,21 +109,29 @@ class Reconciler:
             return
         for workload in workloads:
             execution_id = workload.labels.get("execution_id")
-            if not execution_id or workload.name != f"exec-{execution_id}":
+            if (
+                workload.labels.get("owner") != "agent-runtime"
+                or not execution_id
+                or workload.name != f"exec-{execution_id}"
+            ):
                 continue
-            # A create may commit during this pass; the initial snapshot is insufficient for GC.
+            # Fresh state covers both concurrent creates and late-visible terminal workloads.
             with self.db.engine.connect() as conn:
-                found = False
+                record = None
                 for tenant_id in tenants:
                     e = self.db.executions
-                    if conn.execute(
-                        select(e.c.id).where(
-                            e.c.tenant_id == tenant_id, e.c.workload_name == workload.name
+                    record = (
+                        conn.execute(
+                            select(e).where(
+                                e.c.tenant_id == tenant_id, e.c.workload_name == workload.name
+                            )
                         )
-                    ).first():
-                        found = True
+                        .mappings()
+                        .first()
+                    )
+                    if record is not None:
                         break
-            if not found:
+            if record is None or (record["status"] in TERMINAL and matches(workload, record)):
                 try:
                     self.backend.delete(workload.name)
                 except BackendUnavailable:

@@ -422,3 +422,65 @@ def test_LC_1_cancel_during_backend_create_blocks_stale_running_write(env, monke
     reconcile(env)
     assert env.backend.get(f"exec-{execution_id}") is None
     assert env.backend.create_calls == 1
+
+
+def test_LC_11_cleanup_observes_workloads_not_terminal_history(env, monkeypatch):
+    history = [create(env).json()["id"] for _ in range(20)]
+    for execution_id in history:
+        assert cancel(env, execution_id).status_code == 200
+    active = running(env)
+    late = history[0]
+    orphan = str(uuid4())
+    for execution_id in (late, orphan):
+        env.backend.appear(
+            f"exec-{execution_id}",
+            {
+                "owner": "agent-runtime",
+                "execution_id": execution_id,
+            },
+        )
+    observed = []
+    lists = []
+    original_get, original_list = env.backend.get, env.backend.list_owned
+
+    def observe(name):
+        observed.append(name)
+        return original_get(name)
+
+    def list_once():
+        lists.append(True)
+        return original_list()
+
+    monkeypatch.setattr(env.backend, "get", observe)
+    monkeypatch.setattr(env.backend, "list_owned", list_once)
+    reconcile(env)
+    assert observed == [f"exec-{active}"]
+    assert len(lists) == 1
+    assert original_get(f"exec-{late}") is None
+    assert original_get(f"exec-{orphan}") is None
+    assert original_get(f"exec-{active}") is not None
+
+
+def test_LC_11_cleanup_lookup_failure_never_means_orphan(env, monkeypatch):
+    orphan = str(uuid4())
+    env.backend.appear(f"exec-{orphan}", {"owner": "agent-runtime", "execution_id": orphan})
+    original_connect = env.db.engine.connect
+    original_list = env.backend.list_owned
+
+    def unavailable():
+        raise OperationalError("connection", {}, Exception("unavailable"))
+
+    def list_then_lose_database():
+        workloads = original_list()
+        monkeypatch.setattr(env.db.engine, "connect", unavailable)
+        return workloads
+
+    monkeypatch.setattr(env.backend, "list_owned", list_then_lose_database)
+    with pytest.raises(OperationalError):
+        reconcile(env)
+    assert env.backend.delete_calls == 0
+    assert env.backend.get(f"exec-{orphan}") is not None
+    monkeypatch.setattr(env.db.engine, "connect", original_connect)
+    monkeypatch.setattr(env.backend, "list_owned", original_list)
+    reconcile(env)
+    assert env.backend.get(f"exec-{orphan}") is None
