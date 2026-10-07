@@ -53,3 +53,7 @@ s1-down:
 
 s1-leftovers:
 	uv run python -m scripts.s1 leftovers
+
+.PHONY: aws-cost
+aws-cost:
+	uv run python scripts/aws_cost.py
