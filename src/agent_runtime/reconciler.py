@@ -1,4 +1,5 @@
 import hashlib
+import math
 import secrets
 
 from sqlalchemy import select
@@ -21,8 +22,9 @@ def matches(workload, row):
 
 
 class Reconciler:
-    def __init__(self, db, backend, failpoints):
+    def __init__(self, db, backend, failpoints, max_active_executions=3):
         self.db, self.backend, self.failpoints = db, backend, failpoints
+        self.max_active_executions = max_active_executions
 
     def change(self, row, status, now, **values):
         with self.db.engine.begin() as conn:
@@ -30,12 +32,17 @@ class Reconciler:
 
     def cleanup(self, row):
         try:
-            if matches(self.backend.get(row["workload_name"]), row):
-                self.backend.delete(row["workload_name"])
+            workload = self.backend.get(row["workload_name"])
+            if matches(workload, row):
+                self.backend.delete(row["workload_name"], workload.uid)
         except BackendUnavailable:
             pass
 
     def reconcile_once(self, now):
+        try:
+            workloads = self.backend.list_owned()
+        except BackendUnavailable:
+            workloads = None
         # Complete the authoritative lookup before making any backend changes.
         with self.db.engine.connect() as conn:
             tenants = conn.execute(select(self.db.tenants.c.id)).scalars().all()
@@ -51,6 +58,7 @@ class Reconciler:
                     .mappings()
                     .all()
                 )
+        active = sum(row["status"] in {"PROVISIONING", "RUNNING"} for row in rows)
         for row in rows:
             if now >= row["deadline_at"]:
                 changed = self.change(row, "TIMED_OUT", now)
@@ -58,16 +66,27 @@ class Reconciler:
                     self.cleanup(changed)
                 continue
             if row["status"] == "PENDING":
-                claimed = self.change(row, "PROVISIONING", now, launch_attempted_at=now)
+                if workloads is None or active >= self.max_active_executions:
+                    continue
+                credential = secrets.token_urlsafe(32)
+                claimed = self.change(
+                    row,
+                    "PROVISIONING",
+                    now,
+                    launch_attempted_at=now,
+                    credential_hash=hashlib.sha256(credential.encode()).hexdigest(),
+                )
                 if not claimed:
                     continue
+                active += 1
                 self.failpoints.hit("after_claim")
-                credential = secrets.token_urlsafe(32)
                 spec = WorkloadSpec(
                     str(row["id"]),
                     credential,
                     row["deadline_at"],
                     {"owner": "agent-runtime", "execution_id": str(row["id"])},
+                    row["input"],
+                    max(1, math.ceil((row["deadline_at"] - now).total_seconds())),
                 )
                 try:
                     uid = self.backend.create(row["workload_name"], spec)
@@ -82,7 +101,6 @@ class Reconciler:
                         "RUNNING",
                         now,
                         workload_uid=uid,
-                        credential_hash=hashlib.sha256(credential.encode()).hexdigest(),
                     )
                 continue
             try:
@@ -95,7 +113,9 @@ class Reconciler:
                     changed = self.change(row, "RUNNING", now, workload_uid=workload.uid)
                 else:
                     changed = self.change(row, "FAILED", now, failure_reason="LAUNCH_UNKNOWN")
-            elif workload is None or workload.phase == "LOST":
+            elif (
+                workload is None or workload.phase == "LOST" or workload.uid != row["workload_uid"]
+            ):
                 changed = self.change(row, "FAILED", now, failure_reason="POD_LOST")
             elif workload.phase in {"SUCCEEDED", "FAILED"}:
                 changed = self.change(
@@ -103,9 +123,7 @@ class Reconciler:
                 )
             if changed and changed["status"] in TERMINAL:
                 self.cleanup(changed)
-        try:
-            workloads = self.backend.list_owned()
-        except BackendUnavailable:
+        if workloads is None:
             return
         for workload in workloads:
             execution_id = workload.labels.get("execution_id")
@@ -133,6 +151,6 @@ class Reconciler:
                         break
             if record is None or (record["status"] in TERMINAL and matches(workload, record)):
                 try:
-                    self.backend.delete(workload.name)
+                    self.backend.delete(workload.name, workload.uid)
                 except BackendUnavailable:
                     return

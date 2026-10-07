@@ -13,7 +13,8 @@ build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: requires local Mock Workday HTTP service"]
+markers = ["integration: requires local Mock Workday HTTP service", "k8s: requires guarded Colima cluster"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

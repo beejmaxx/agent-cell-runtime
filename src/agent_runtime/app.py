@@ -15,24 +15,34 @@ from agent_runtime.config import Settings
 from agent_runtime.db import Database
 from agent_runtime.executions import APIError
 from agent_runtime.failpoints import Failpoints
+from agent_runtime.kubernetes import KubernetesBackend
 from agent_runtime.mockworkday import MockWorkday
 from agent_runtime.reconciler import Reconciler
 from agent_runtime.seed import seed
 
 
-def create_app(*, db=None, mw=None, clock=None, backend=None, failpoints=None, reconcile=True):
+def create_app(
+    *, db=None, mw=None, clock=None, backend=None, failpoints=None, reconcile=True, settings=None
+):
     owns_db = db is None
     owns_mw = mw is None
+    settings = settings or (Settings.from_env() if db is None else Settings(str(db.engine.url)))
+    owns_backend = backend is None
     if db is None:
-        settings = Settings.from_env()
         db = Database(settings.database_url)
         db.initialize()
         seed(db, settings.mw_base_url)
     mw = mw or MockWorkday()
     clock = clock or Clock()
-    backend = backend or FakeBackend()
+    if backend is None:
+        if settings.workload_backend == "fake":
+            backend = FakeBackend()
+        elif settings.workload_backend == "kubernetes":
+            backend = KubernetesBackend(settings)
+        else:
+            raise ValueError("Unknown workload backend")
     failpoints = failpoints or Failpoints()
-    reconciler = Reconciler(db, backend, failpoints)
+    reconciler = Reconciler(db, backend, failpoints, settings.max_active_executions)
     stop = Event()
 
     def loop():
@@ -56,10 +66,12 @@ def create_app(*, db=None, mw=None, clock=None, backend=None, failpoints=None, r
                 thread.join()
             if owns_mw:
                 mw.client.close()
+            if owns_backend and isinstance(backend, KubernetesBackend):
+                backend.client.close()
             if owns_db:
                 db.engine.dispose()
 
-    app = FastAPI(title="Agent Runtime R1", lifespan=lifespan)
+    app = FastAPI(title="Agent Runtime R2", lifespan=lifespan)
     app.state.db, app.state.mw, app.state.clock = db, mw, clock
     app.state.backend, app.state.failpoints = backend, failpoints
     app.state.reconciler = reconciler

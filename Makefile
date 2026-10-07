@@ -1,7 +1,7 @@
 .PHONY: test test-integration run init-db
 
 test:
-	uv run pytest -m 'not integration'
+	uv run pytest -m 'not integration and not k8s'
 
 test-integration:
 	uv run pytest -m integration
@@ -32,3 +32,7 @@ agent-image:
 .PHONY: k8s-preflight
 k8s-preflight:
 	uv run python scripts/k8s_preflight.py
+
+.PHONY: test-k8s
+test-k8s: k8s-preflight
+	uv run pytest -m k8s -x

@@ -10,6 +10,8 @@ class WorkloadSpec:
     credential: str
     deadline_at: datetime
     labels: dict[str, str]
+    input: dict
+    active_deadline_seconds: int
 
 
 @dataclass(frozen=True)
@@ -35,7 +37,7 @@ class CreateOutcomeUnknown(Exception):
 class WorkloadBackend(Protocol):
     def create(self, name: str, spec: WorkloadSpec) -> str: ...
     def get(self, name: str) -> Workload | None: ...
-    def delete(self, name: str) -> None: ...
+    def delete(self, name: str, uid: str | None = None) -> None: ...
     def list_owned(self) -> list[Workload]: ...
 
 
@@ -88,11 +90,13 @@ class FakeBackend:
             self._check()
             return self.workloads.get(name)
 
-    def delete(self, name):
+    def delete(self, name, uid=None):
         with self._lock:
             self._check()
             self.delete_calls += 1
-            self.workloads.pop(name, None)
+            workload = self.workloads.get(name)
+            if workload and (uid is None or workload.uid == uid):
+                self.workloads.pop(name)
 
     def list_owned(self):
         with self._lock:

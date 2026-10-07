@@ -2,7 +2,7 @@
 
 A hands-on exploration of infrastructure for securely executing AI agents: Python control services, Kubernetes workloads, deterministic authorization, AWS identity, and distributed failure recovery.
 
-**Status:** R1 local execution lifecycle implemented: synchronous FastAPI, PostgreSQL, a reconciler, and a deterministic fake workload backend. The invariant tests exercise lifecycle and caller scoping; this is not a sandbox and establishes no workload isolation guarantees.
+**Status:** R2 adds a Colima Kubernetes backend to the R1 execution lifecycle: synchronous FastAPI, PostgreSQL, a reconciler, a deterministic fake workload backend, and real Kubernetes Pods. The invariant tests exercise lifecycle and caller scoping; this is not a sandbox and establishes no workload isolation guarantees.
 
 The goal is to build and understand this path:
 
@@ -76,9 +76,54 @@ make run
 
 A human token and `Idempotency-Key` create an execution through `POST /api/v1/executions`. The owner can GET or cancel it. R1 workloads are in-memory records: they do not run code. The temporary `/complete` endpoint accepts only the credential passed to that execution's fake backend spec; it is a test-only stand-in for R3's gateway. The database stores only its hash.
 
-The reconciler attempts launch at most once. An uncertain launch can fail conservatively, and an adopted workload whose credential was never persisted must time out. Deadlines and cancellation change database authority even when the backend is unavailable; label-checked cleanup follows. Results are untrusted JSON. These are lab policies, not claims about Workday behavior. No Kubernetes, gateway, or AWS implementation is included in R1.
+The reconciler attempts launch at most once. An uncertain launch can fail conservatively, and an adopted workload retains the credential hash persisted at claim time so it can complete. Deadlines and cancellation change database authority even when the backend is unavailable; label-checked cleanup follows. Results are untrusted JSON. These are lab policies, not claims about Workday behavior. No Kubernetes, gateway, or AWS implementation is included in R1.
 
 This is an independent educational project. It does not describe or reproduce any company's proprietary architecture. Use synthetic data for experiments.
+
+## Run R2 against Colima
+
+R2 is evidence about the controller against a real Kubernetes API server. It makes
+no isolation claims; the execution substrate for the revised threat model remains
+undecided. The projected token is unused until R3. The temporary completion
+credential is visible to Pod readers and travels over plain HTTP.
+
+Use the existing Colima context and run these targets serially:
+
+```sh
+make k8s-tools agent-image k8s-up
+make test-k8s
+```
+
+The checksum-verified kubectl 1.35 binary is local to `.local/bin`; the global
+kubectl is unchanged. Targets refuse other contexts and non-loopback API URLs.
+Only `agent-runtime` and `agent-exec` carrying `lab.agent-runtime/owned=true` are
+managed. The admission test briefly creates and deletes an unlabeled control
+namespace; the RBAC test only sends a dry-run request to `rook-dev` and expects 403.
+No NetworkPolicy, gateway, AWS, or EKS code is included.
+
+`make test-k8s` first checks the tool, marked namespaces, RBAC, local image, and
+projected token claims inside a Pod. Tests use a throwaway PostgreSQL database,
+a real local runtime server, an HTTP Mock Workday fake, Pod status, and completion
+results. They do not depend on `kubectl logs`. Sanitized evidence is saved under
+`.local/k8s/`. CPU, OOM, storage eviction, and containment tests are outside R2.
+
+`make k8s-up` writes the API URL, CA, and a 24-hour controller token under ignored
+`.local/k8s/`. Refresh it with `make k8s-token`; the backend rereads it each request.
+To run the application with your local runtime database:
+
+```sh
+export WORKLOAD_BACKEND=kubernetes
+export K8S_API_URL="$(cat .local/k8s/api-url)"
+export K8S_CA_FILE="$PWD/.local/k8s/ca.crt"
+export K8S_TOKEN_FILE="$PWD/.local/k8s/controller.token"
+export RUNTIME_URL=http://192.168.5.2:8000
+make run
+```
+
+Keep the database and Mock Workday configuration from the local setup above.
+`MAX_ACTIVE_EXECUTIONS` defaults to 3; the namespace quota is the admission backstop.
+`make k8s-down` tears down only the two marked namespaces. The local image and
+ignored connection/evidence files remain.
 
 ## License
 

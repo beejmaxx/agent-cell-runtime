@@ -139,7 +139,7 @@ idempotency_records(
 
 ## 6. Completion (LC-9)
 
-- **Launch credential:** when the reconciler launches a workload, it generates a random per-execution credential, stores its SHA-256 hash, and passes the plaintext to the backend as part of the workload spec. This stands in for R3's projected token.
+- **Launch credential:** when the reconciler claims a launch, it generates a random per-execution credential and stores its SHA-256 hash atomically with `PENDING → PROVISIONING`, before create (R2 D6); it passes the plaintext to the backend as part of the workload spec. This stands in for R3's projected token.
 - **Request:** `POST /executions/{id}/complete` with `Authorization: Execution <credential>` and body `{"result": <JSON object, at most 64 KiB>}`. A bad or missing credential returns 401.
 - **Identity:** the completion route is the one route not authenticated by a user token. The execution credential identifies exactly one execution, and the tenant and principal come from that execution's record. A credential is valid only for the execution in the path.
 
@@ -160,12 +160,14 @@ The result is untrusted data, stored and returned as JSON, never interpreted.
 
 ```python
 class WorkloadBackend(Protocol):
-    def create(self, name: str, spec: WorkloadSpec) -> str: ...   # returns uid
-    def get(self, name: str) -> Workload | None: ...              # None = definitely absent
-    def delete(self, name: str) -> None: ...                       # idempotent
-    def list_owned(self) -> list[Workload]: ...                    # runtime-labeled only
+    def create(self, name: str, spec: WorkloadSpec) -> str: ...  # returns uid
+    def get(self, name: str) -> Workload | None: ...  # None = definitely absent
+    def delete(self, name: str, uid: str | None = None) -> None: ...  # idempotent
+    def list_owned(self) -> list[Workload]: ...  # runtime-labeled only
 ```
 
+- `WorkloadSpec` includes `input` and `active_deadline_seconds` (remaining seconds, rounded up, minimum 1); deletion accepts the observed UID as a precondition (R2).
+- Workload phases are observations, not execution outcomes; only committed completion produces execution SUCCEEDED.
 - `Workload` has `name`, `uid`, `phase` (`RUNNING`, `SUCCEEDED`, `FAILED`, or `LOST`), and `labels`.
 - Every workload the runtime creates carries the labels `owner=agent-runtime` and `execution_id=<id>`. Adoption and cleanup require both labels to match; a name collision alone is not enough.
 - **Errors:**
@@ -191,26 +193,27 @@ A fake workload does not execute code. Tests drive completion through the API us
 
 ## 8. Reconciler
 
-`reconcile_once(now)` performs one pass. The app runs it in a loop every second; tests call it directly.
+`reconcile_once(now)` performs one pass. The app runs it in a loop every second; tests call it directly. R2 calls `list_owned()` first and reuses that result for cleanup and orphan collection; an unavailable list prevents PENDING claims while database-only transitions still apply (D7).
 
 1. **PENDING:**
-   - Claim it conditionally (`PENDING → PROVISIONING`, set `launch_attempted_at`, commit).
+   - Claim only after a successful list and while the global count of PROVISIONING/RUNNING executions is below `MAX_ACTIVE_EXECUTIONS` (default 3).
+   - Generate the launch credential; claim conditionally (`PENDING → PROVISIONING`, set `launch_attempted_at` and its credential hash, commit).
    - Failpoint **`after_claim`**.
-   - Generate the credential and call `create(workload_name, spec)`:
-     - success → failpoint **`after_create`** → record `workload_uid` and the credential hash, move to RUNNING;
+   - Call `create(workload_name, spec)` with that credential:
+     - success → failpoint **`after_create`** → record `workload_uid`, move to RUNNING;
      - `CreateRejected` → `FAILED (LAUNCH_FAILED)`;
      - `CreateOutcomeUnknown` or `BackendUnavailable` → stay PROVISIONING.
 2. **PROVISIONING** (launch already attempted): `get(name)`.
-   - Exists with matching `owner` and `execution_id` labels → adopt: record the uid and move to RUNNING. A name match with wrong labels is never adopted; the execution fails as `LAUNCH_UNKNOWN`. A credential that was never persisted means completion is impossible, so the execution will time out. That is acceptable, and the case is covered by the failpoint test.
+   - Exists with matching `owner` and `execution_id` labels → adopt: record the uid and move to RUNNING. A name match with wrong labels is never adopted; the execution fails as `LAUNCH_UNKNOWN`. Adoption retains the persisted credential hash, so the original workload can complete after a lost response or controller restart (R2 D6).
    - `None` → `FAILED (LAUNCH_UNKNOWN)`. **Never call `create` again for this execution.**
    - Unavailable → no change.
 3. **RUNNING:** `get(name)`.
-   - `None` or `LOST` → `FAILED (POD_LOST)`.
+   - `None`, `LOST`, or a UID different from the recorded `workload_uid` → `FAILED (POD_LOST)`; a same-name replacement is not adopted (R2).
    - Phase SUCCEEDED or FAILED without a completion → `FAILED (EXITED_WITHOUT_COMPLETION)`.
    - Unavailable → no change.
 4. **Deadlines:** any non-terminal execution with `now >= deadline_at` → `TIMED_OUT`. This is database-only and applies even when the backend is unavailable (LC-7).
-5. **Cleanup:** terminal execution whose workload exists with matching labels → `delete`. This includes a workload that becomes visible after the execution already failed (LC-3d); it never gains authority, because completion requires a RUNNING execution. Failpoint **`before_cleanup`** sits between the terminal transition and cleanup in the cancel and complete paths.
-6. **Orphans (part of LC-11 in R1):** only if the database query for executions succeeded in this pass. For each `list_owned()` workload with no execution row → `delete`. Unowned workloads are never touched. No grace period.
+5. **Cleanup:** terminal execution whose workload exists with matching labels → `delete` with the observed UID precondition (R2). This includes a workload that becomes visible after the execution already failed (LC-3d); it never gains authority, because completion requires a RUNNING execution. Failpoint **`before_cleanup`** sits between the terminal transition and cleanup in the cancel and complete paths.
+6. **Orphans (part of LC-11 in R1):** only if the database query for executions succeeded in this pass. For each `list_owned()` workload with no execution row → `delete` with the observed UID precondition (R2). Unowned workloads are never touched. No grace period.
 
 - **Conditional transitions everywhere:** every transition is `UPDATE … WHERE id = :id AND status = :expected`. Zero rows updated means another transition won, and the reconciler moves on.
 - **Failpoints:** `failpoints.arm("after_claim")` makes the next hit raise `SimulatedCrash`. The next `reconcile_once` must converge (LC-10).

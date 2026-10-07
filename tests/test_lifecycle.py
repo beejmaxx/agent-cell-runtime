@@ -93,7 +93,7 @@ def test_LC_3d_late_visible_workload_is_cleaned_without_authority(env):
     reconcile(env, restart=True)
     assert row(env, execution_id)["failure_reason"] == "LAUNCH_UNKNOWN"
     env.backend.appear(name, {"owner": "agent-runtime", "execution_id": execution_id})
-    assert complete(env, execution_id, credential=credential).status_code == 401
+    assert complete(env, execution_id, credential=credential).status_code == 409
     reconcile(env)
     assert env.backend.get(name) is None
     assert env.backend.create_calls == 1
@@ -131,7 +131,7 @@ def test_LC_4_create_observes_durable_claim(env, monkeypatch):
 
 
 @pytest.mark.parametrize("crash", [False, True])
-def test_LC_3b_LC_5_LC_10_adopt_then_timeout_without_credential(env, crash):
+def test_LC_3b_LC_5_LC_10_adopt_and_complete_with_persisted_credential(env, crash):
     execution_id = create(env).json()["id"]
     if crash:
         env.failpoints.arm("after_create")
@@ -143,13 +143,12 @@ def test_LC_3b_LC_5_LC_10_adopt_then_timeout_without_credential(env, crash):
     reconcile(env, restart=True)
     record = row(env, execution_id)
     assert record["status"] == "RUNNING" and record["workload_uid"]
-    assert record["credential_hash"] is None
+    assert record["credential_hash"] is not None
     assert len(env.backend.list_owned()) == 1
     assert env.backend.create_calls == 1
-    assert complete(env, execution_id).status_code == 401
-    env.clock.set(record["deadline_at"])
+    assert complete(env, execution_id).status_code == 200
     reconcile(env)
-    assert row(env, execution_id)["status"] == "TIMED_OUT"
+    assert row(env, execution_id)["status"] == "SUCCEEDED"
     assert env.backend.list_owned() == []
 
 
@@ -417,7 +416,7 @@ def test_LC_1_cancel_during_backend_create_blocks_stale_running_write(env, monke
     record = row(env, execution_id)
     assert record["status"] == "CANCELLED"
     assert record["workload_uid"] is None
-    assert record["credential_hash"] is None
+    assert record["credential_hash"] is not None
     assert env.backend.create_calls == 1
     reconcile(env)
     assert env.backend.get(f"exec-{execution_id}") is None
@@ -484,3 +483,68 @@ def test_LC_11_cleanup_lookup_failure_never_means_orphan(env, monkeypatch):
     monkeypatch.setattr(env.backend, "list_owned", original_list)
     reconcile(env)
     assert env.backend.get(f"exec-{orphan}") is None
+
+
+def test_LC_7_list_outage_preserves_pending_claims(env):
+    execution_id = create(env).json()["id"]
+    env.backend.set_unavailable(True)
+    reconcile(env)
+    record = row(env, execution_id)
+    assert record["status"] == "PENDING"
+    assert record["credential_hash"] is None and record["launch_attempted_at"] is None
+    assert env.backend.create_calls == 0
+    env.backend.set_unavailable(False)
+    reconcile(env)
+    assert row(env, execution_id)["status"] == "RUNNING"
+    assert complete(env, execution_id).status_code == 200
+
+
+def test_LC_6_same_name_replacement_is_lost_and_deleted_by_its_uid(env, monkeypatch):
+    execution_id = running(env)
+    name = f"exec-{execution_id}"
+    original_uid = env.backend.get(name).uid
+    env.backend.remove(name)
+    env.backend.appear(name, {"owner": "agent-runtime", "execution_id": execution_id})
+    replacement_uid = env.backend.get(name).uid
+    assert replacement_uid != original_uid
+    calls = []
+    original_delete = env.backend.delete
+
+    def delete(name, uid=None):
+        calls.append(uid)
+        return original_delete(name, uid)
+
+    monkeypatch.setattr(env.backend, "delete", delete)
+    reconcile(env)
+    assert row(env, execution_id)["failure_reason"] == "POD_LOST"
+    assert row(env, execution_id)["workload_uid"] == original_uid
+    assert calls and set(calls) == {replacement_uid}
+    assert env.backend.get(name) is None
+    assert env.backend.create_calls == 1
+
+
+def test_ISO_7_capacity_is_global_and_waiters_keep_deadlines(env):
+    env.app.state.reconciler.max_active_executions = 2
+    first = running(env)
+    token = env.issuer.token("dave", "globex")
+    grant = env.issuer.grant("dave", "globex")
+    second = create(env, token=token, grant=grant).json()["id"]
+    reconcile(env)
+    third = create(env).json()["id"]
+    reconcile(env)
+    assert row(env, second)["status"] == "RUNNING"
+    assert row(env, third)["status"] == "PENDING"
+    assert complete(env, first).status_code == 200
+    reconcile(env)
+    assert row(env, third)["status"] == "RUNNING"
+    fourth = create(env, timeout_seconds=30).json()["id"]
+    env.clock.advance(30)
+    reconcile(env)
+    assert row(env, fourth)["status"] == "TIMED_OUT"
+
+
+def test_LC_8_remaining_active_deadline_seconds(env):
+    execution_id = create(env, timeout_seconds=30).json()["id"]
+    env.clock.advance(10.5)
+    reconcile(env)
+    assert env.backend.specs[f"exec-{execution_id}"].active_deadline_seconds == 20

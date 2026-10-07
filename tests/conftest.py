@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 from agent_runtime.app import create_app
 from agent_runtime.backend import FakeBackend
 from agent_runtime.clock import Clock
+from agent_runtime.config import Settings
 from agent_runtime.db import Database
 from agent_runtime.failpoints import Failpoints
 from agent_runtime.mockworkday import MockWorkday
@@ -137,7 +138,13 @@ def env(db):
     mw = MockWorkday(httpx.Client(transport=httpx.MockTransport(issuer.handle), trust_env=False))
     backend, failpoints = FakeBackend(), Failpoints()
     app = create_app(
-        db=db, mw=mw, clock=clock, backend=backend, failpoints=failpoints, reconcile=False
+        db=db,
+        mw=mw,
+        clock=clock,
+        backend=backend,
+        failpoints=failpoints,
+        reconcile=False,
+        settings=Settings(str(db.engine.url), max_active_executions=1000),
     )
     with TestClient(app) as client:
         env = SimpleNamespace(
@@ -186,7 +193,9 @@ def row(env, execution_id):
 
 def reconcile(env, restart=False):
     if restart:
-        env.app.state.reconciler = Reconciler(env.db, env.backend, Failpoints())
+        env.app.state.reconciler = Reconciler(
+            env.db, env.backend, Failpoints(), env.app.state.reconciler.max_active_executions
+        )
     env.app.state.reconciler.reconcile_once(env.clock.now())
 
 
