@@ -33,7 +33,10 @@ def test_ISO_5_eks_template_changes_only_substrate_fields(spec):
     assert manifest == expected
 
 
-@pytest.mark.parametrize("bad", [None, "context", "arn", "endpoint", "ca", "insecure", "proxy"])
+@pytest.mark.parametrize(
+    "bad",
+    [None, "context", "arn", "endpoint", "ca", "insecure", "proxy", "exec_env", "cluster_info"],
+)
 def test_ISO_1_eks_guard_checks_cluster_identity(monkeypatch, tmp_path, bad):
     monkeypatch.setattr(k8s, "PROFILE", "eks")
     monkeypatch.setattr(k8s, "STATE", tmp_path)
@@ -58,6 +61,10 @@ def test_ISO_1_eks_guard_checks_cluster_identity(monkeypatch, tmp_path, bad):
         cluster["insecure-skip-tls-verify"] = True
     elif bad == "proxy":
         cluster["proxy-url"] = "http://proxy"
+    elif bad == "exec_env":
+        config["users"][0]["user"]["exec"]["env"] = [{"name": "AWS_PROFILE", "value": "other"}]
+    elif bad == "cluster_info":
+        config["users"][0]["user"]["exec"]["provideClusterInfo"] = True
 
     def kubectl(*args):
         if args == ("config", "current-context"):

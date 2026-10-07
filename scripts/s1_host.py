@@ -42,6 +42,8 @@ def harness_exec():
             HARNESS_ROLE,
         ],
         "interactiveMode": "Never",
+        "env": None,
+        "provideClusterInfo": False,
     }
 
 
