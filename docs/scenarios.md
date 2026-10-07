@@ -53,6 +53,23 @@ Acme chat bot ──► edge (trusted) ─────────────�
 
 **Fixed by the threat model:** no private key or downstream credential may live inside the execution. Under guest compromise (P1 and P2 in scope), anything in the guest is stolen.
 
+**Customer-provided certificates are not unsafe in themselves** (review correction). A customer can register a certificate through an authenticated onboarding process, and the platform maps it to an approved identity and tenant; OAuth mTLS client authentication supports registered certificates, including self-signed ones ([RFC 8705 §2](https://www.rfc-editor.org/rfc/rfc8705.html#section-2)). The unsafe step is letting certificate *contents* choose the identity. What the threat model rules out is placing any such key inside an execution.
+
+**Adding mTLS does not bind an existing bearer token to its presenter.** That binding must be enforced, for example with certificate-bound access tokens ([RFC 8705 §3](https://www.rfc-editor.org/rfc/rfc8705.html#section-3)); otherwise anyone holding some other accepted certificate can replay a stolen token.
+
+**Credential ownership, as lab policy:** a partner or customer keeps the private key it uses to authenticate *to us*; our edge holds our server keys; our gateway holds any client key it needs for outbound calls; executions hold only their scoped execution token.
+
+**Credential lifecycle moments** every case below must handle:
+
+| Moment | Identity question | Audit question |
+|---|---|---|
+| Registration | Who may register a credential, and which tenant relationship does it authenticate? | Who approved the integration and its permissions? |
+| Use | Which identity and tenant does this connection map to? | Which credential version authenticated each call? |
+| Rotation | Accept the replacement only through an authorized process, with a defined overlap | Who changed the credential, and when? |
+| Revocation or disabling | A still-valid certificate must stop authorizing that tenant's operations | When did it take effect, and what was already dispatched? |
+
+A certificate can identify one partner service across many customers. It does not by itself authorize access to any customer: tenant approval, delegated authority, the permitted operation, and task correlation remain separate checks.
+
 ### C1. Outbound to the customer's system (step 3)
 
 Acme IT accepts only clients that present a certificate it trusts.
@@ -76,6 +93,10 @@ Acme's chat bot needs an address and a server identity for "Acme's onboarding ag
 - **Hypothesis:** a trusted **edge** owns the inbound side. It terminates TLS with the endpoint's server certificate, authenticates the caller (Acme's bot), and turns the message into work: either delivered to a running execution, which pulls it over its existing outbound connection to the gateway, or used to start a new execution (ambient mode, as the agent's own integration identity).
 - **Server certificate options:** a Workday domain per tenant or agent (Workday-managed certificate), or a customer custom domain (customer-provided certificate, or one issued automatically after Acme proves it owns the domain). Either way it terminates at the edge, never in the execution.
 - **Caller authentication options:** OAuth client credentials, mTLS with Acme's client certificate (the mirror image of C1), or signed webhooks.
+
+A2A does not require inbound connections to executions either: A2A's guidance places authentication, authorization, and routing in API management in front of agents ([A2A enterprise guidance](https://a2a-protocol.org/latest/topics/enterprise-ready/)).
+
+**Lab policy: a callback never resurrects an expired execution's authority.** The edge records the message against the durable task. Any further business mutation needs a fresh authorization decision, and a new execution where necessary.
 
 **Questions to decide:**
 
@@ -109,6 +130,16 @@ Audit is defined by the questions it must answer before any storage choice.
 5. **Configuration changes:** who uploaded, rotated, or revoked the agent's certificates, and who changed its egress allowlist.
 6. **Correlation:** join the runtime's records with Workday core's audit (`X-Request-Id`, OP-2).
 
+### Three kinds of record, not one "agent action log"
+
+| Record | Written by | Means |
+|---|---|---|
+| The agent says it changed something | The execution | An **untrusted claim** |
+| The gateway authorized and dispatched a request | The gateway | An **observation of a request**: intent, not outcome |
+| The downstream service confirmed it | The downstream service's response or receipt, recorded by the gateway | **Evidence of an outcome** |
+
+**First failure case to design for:** the gateway sends a mutation, the downstream commits it, and the connection drops before the response arrives. The audit must distinguish **authorized**, **dispatch attempted**, **outcome unknown**, and **confirmed committed**. A durable record written before dispatch proves intent, not success. Recovery needs downstream idempotency (OP-1) or reconciliation; a blind retry can duplicate the effect.
+
 ### Required properties
 
 | Property | Question to settle | Initial position (hypothesis) |
@@ -141,6 +172,14 @@ Whether one system can do both jobs, or the index is built from the record, foll
 | Inbound path to an agent | None, deliberately | Edge component and message delivery (C2) |
 | Delegation chain to external systems | Workday core only (delegated token) | How Alice's authority is conveyed to Acme IT (C1) |
 | Audit | Correlation IDs planned (OP-2); audit is a later stage | Everything in Part 2 |
+
+## Variant B: a partner agent (Workday-inspired)
+
+Closer to the announced Agent Gateway: Acme approves PayrollCo's external payroll agent. Alice authorizes the hosted HR agent to propose a job change and request payroll validation; PayrollCo answers after the original execution has ended. It exercises the same lifecycle moments from the partner's side: PayrollCo registers, our gateway verifies PayrollCo's server identity on the way out, PayrollCo's callback is authenticated and bound to an existing Acme task, PayrollCo rotates its certificate, and Acme disables the integration.
+
+## Priority (review, 2026-10-08; pending the user's decision)
+
+A review against the job description found the lab much deeper on sandbox isolation and tool authorization than on **data, context, and model enforcement**, and the **maincar–sidecar contract**. Proposed order: finish the Fargate experiment; then build one complete maincar → sidecar → gateway → data/model/tool path (a context restriction, a mid-run policy change, a streaming model call with cancellation, a crash around dispatch); then tenant overload and an incident exercise. This document then serves as the design reference for credentials and audit, built later as governed credential lifecycles inside a working enforcement path.
 
 ## Open questions (for the user)
 
