@@ -11,6 +11,11 @@
 ## Context
 
 - **Workday fact:** in June 2025 Workday announced an Agent System of Record, which manages AI agents, including third-party ones, alongside people, and an Agent Gateway. The Gateway registers third-party agents and supports agent-to-agent interaction over A2A and MCP ([press release](https://newsroom.workday.com/2025-06-03-Workday-Announces-New-AI-Agent-Partner-Network-and-Agent-Gateway-to-Power-the-Next-Generation-of-Human-and-Digital-Workforces?asPDF=1), [Agent System of Record](https://www.workday.com/en-ae/artificial-intelligence/agent-system-of-record.html)). That concerns agents running elsewhere.
+- **Workday fact, agent identity today** ([agent security concepts](https://doc.workday.com/admin-guide/en-us/workday-ai/agents/agent-security/concept--agent-security.html), [configure external agents](https://doc.workday.com/admin-guide/en-us/workday-ai/agents/agent-system-of-record/external-agents/configure-external-agents.html)):
+  - each agent has up to two **Agent System Users (ASUs)**, identity accounts similar to integration system users: one for delegate execution (acting for a worker, with the worker's permissions) and one for ambient execution (acting as itself);
+  - an OAuth 2.0 client is generated per ASU; a key pair is created and its public key registered with Workday's authorization server; ASOR keeps the client credentials, including the private key, in a Credential Store and holds only a reference ID;
+  - for an external agent's **ambient** skills, the customer provides an **X.509 public key** from their agent platform; the matching key pair signs JWT assertions at runtime. **Delegate** mode uses an OAuth 2.0 On-Behalf-Of token exchange;
+  - audit: in delegate mode the agent is recorded as "By User" and the human as "On Behalf Of User"; in ambient mode the agent's ASU is the "By User".
 - **Reported:** the agent runtime is new and not yet implemented. It lets Workday customers run **their own agent code inside Workday**. The hiring manager named handling per-agent certificates as an open problem ("TBD"). The job description includes audit logging.
 - **Hypothesis:** the lab's model applies: customer code is untrusted, it runs in an isolated execution, and only the trusted gateway holds authority ([threat-model.md](threat-model.md), [trust-boundaries.md](trust-boundaries.md)).
 
@@ -48,6 +53,15 @@ Acme chat bot ──► edge (trusted) ─────────────�
 ```
 
 ## Part 1: Identity and certificates
+
+**Four identities, never one certificate** (each has its own credential and lifetime):
+
+| Identity | Example | Lifetime |
+|---|---|---|
+| Stable agent identity | "Acme onboarding agent v3" (Workday's ASU is the analogue) | Across executions |
+| Execution identity | "run E123" (our projected token) | Dies with the execution |
+| Delegated human authority | "agent v3 acting for Alice" (our grant; Workday's On-Behalf-Of exchange) | Bounded by the grant; narrower than Alice |
+| External-system credential | Acme's client certificate for its provisioning API | Managed by its owner; used only by the gateway |
 
 **Mechanism reminder:** a certificate proves possession of a private key. A server certificate proves to a client that it reached the right server. A client certificate (mTLS) proves the client's identity to the server. Whoever holds the key *is* that identity. So the core question in every case below is **who holds the key**.
 
