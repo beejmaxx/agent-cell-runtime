@@ -41,6 +41,7 @@ tests/
   - The runtime verifies it against Mock Workday's JWKS (cached by `kid`, re-fetched on an unknown `kid`), using an RS256 allowlist, expiry by the runtime clock, and `iss` matched to a known tenant.
   - The token's audience is Mock Workday's API, not the runtime. A real system would issue a runtime-audience token through single sign-on; this is documented in [identity-flow.md](identity-flow.md).
   - Delegated and integration tokens are rejected.
+  - If a required JWKS fetch is unreachable or malformed, authentication fails closed with 503 `AUTH_UNAVAILABLE`, and nothing is created.
 - **Principal:** `(tenant_id, account_id = token sub)`.
 - **Scoping (ID-11):** every execution route filters by tenant and principal. Another principal's or another tenant's execution returns **404**, the same as a nonexistent one.
 

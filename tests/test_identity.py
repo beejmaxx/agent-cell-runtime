@@ -1,6 +1,7 @@
 from datetime import timedelta
 from uuid import uuid4
 
+import httpx
 import jwt
 import pytest
 from conftest import cancel, create, get, row
@@ -202,5 +203,64 @@ def test_ID_6_execution_request_validation(env, body):
     response = create(env, **body)
     assert response.status_code == 422
     assert set(response.json()["error"]) == {"code", "message", "request_id"}
+    assert counts(env) == (0, 0)
+    assert create(env).status_code == 201
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "unreachable",
+        "http_error",
+        "invalid_json",
+        "missing_keys",
+        "invalid_keys",
+        "invalid_key",
+        "invalid_rsa",
+        "partial_keys",
+    ],
+)
+def test_ID_11_jwks_unavailable_fails_closed(env, monkeypatch, failure):
+    original_get = env.mw.client.get
+
+    def broken_jwks(url, **kwargs):
+        assert url.endswith("/.well-known/jwks.json")
+        request = httpx.Request("GET", url)
+        if failure == "unreachable":
+            raise httpx.ConnectError("offline", request=request)
+        if failure == "http_error":
+            return httpx.Response(503, request=request)
+        if failure == "invalid_json":
+            return httpx.Response(200, content="not json", request=request)
+        malformed = {
+            "missing_keys": {},
+            "invalid_keys": {"keys": None},
+            "invalid_key": {"keys": [None]},
+            "invalid_rsa": {"keys": [{"kid": "test-key", "kty": "RSA", "n": "AA", "e": "AA"}]},
+        }
+        if failure == "partial_keys":
+            valid = original_get(url, **kwargs).json()
+            data = {"keys": [*valid["keys"], None]}
+        else:
+            data = malformed[failure]
+        return httpx.Response(200, json=data, request=request)
+
+    monkeypatch.setattr(env.mw.client, "get", broken_jwks)
+    for _ in range(2):
+        response = create(env, key="auth-retry")
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "AUTH_UNAVAILABLE"
+        assert counts(env) == (0, 0)
+        assert env.issuer.grant_calls == 0
+    monkeypatch.setattr(env.mw.client, "get", original_get)
+    assert create(env, key="auth-retry").status_code == 201
+
+
+def test_ID_11_unknown_kid_in_valid_jwks_is_bad_token(env):
+    claims = jwt.decode(env.token, options={"verify_signature": False})
+    unknown = jwt.encode(claims, env.issuer.key, algorithm="RS256", headers={"kid": "unknown"})
+    response = create(env, token=unknown)
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
     assert counts(env) == (0, 0)
     assert create(env).status_code == 201

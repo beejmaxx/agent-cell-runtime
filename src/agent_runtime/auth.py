@@ -21,6 +21,28 @@ class Auth:
         self.keys = {}
         self.lock = Lock()
 
+    def refresh_keys(self, tenant):
+        try:
+            keys = self.mw.jwks(tenant)["keys"]
+            if not isinstance(keys, list):
+                raise TypeError("Invalid JWKS")
+            refreshed = {}
+            for key in keys:
+                if not isinstance(key, dict) or not isinstance(key.get("kty"), str):
+                    raise TypeError("Invalid JWK")
+                if key["kty"] == "RSA" and key.get("alg", "RS256") == "RS256":
+                    if not all(
+                        isinstance(key[field], str) and key[field] for field in ("kid", "n", "e")
+                    ):
+                        raise ValueError("Invalid RSA JWK")
+                    refreshed[(tenant["id"], key["kid"])] = jwt.PyJWK.from_dict(key).key
+        except (jwt.PyJWTError, httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            raise APIError(
+                503, "AUTH_UNAVAILABLE", "Cannot retrieve valid verification keys"
+            ) from exc
+        # A malformed response must not partially populate the trusted key cache.
+        self.keys.update(refreshed)
+
     def authenticate(self, conn, token):
         try:
             header = jwt.get_unverified_header(token)
@@ -38,14 +60,7 @@ class Auth:
             cache_key = (tenant["id"], kid)
             with self.lock:
                 if cache_key not in self.keys:
-                    keys = self.mw.jwks(tenant)["keys"]
-                    if not isinstance(keys, list):
-                        raise TypeError("Invalid JWKS")
-                    for key in keys:
-                        if not isinstance(key, dict):
-                            raise TypeError("Invalid JWK")
-                        if key.get("kty") == "RSA" and key.get("alg", "RS256") == "RS256":
-                            self.keys[(tenant["id"], key["kid"])] = jwt.PyJWK.from_dict(key).key
+                    self.refresh_keys(tenant)
                 key = self.keys[cache_key]
             claims = jwt.decode(
                 token,
