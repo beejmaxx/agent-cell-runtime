@@ -464,6 +464,54 @@ def down():
     leftovers()
 
 
+def oidc_evidence(issuer):
+    from urllib.parse import urlsplit
+
+    parsed = urlsplit(issuer)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "oidc.eks.us-east-2.amazonaws.com"
+        or not parsed.path.startswith("/id/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Expected the recorded S1 EKS issuer")
+    arn = f"arn:aws:iam::{ACCOUNT}:oidc-provider/{issuer.removeprefix('https://')}"
+    result = subprocess.run(
+        [
+            "aws",
+            "--profile",
+            "agent-runtime",
+            "--region",
+            REGION,
+            "--no-cli-pager",
+            "iam",
+            "get-open-id-connect-provider",
+            "--open-id-connect-provider-arn",
+            arn,
+            "--output",
+            "json",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        outcome = "present"
+    elif "(NoSuchEntity)" in result.stderr:
+        outcome = "absent"
+    else:
+        outcome = "unverified"
+    return {
+        "operation": "iam:GetOpenIDConnectProvider",
+        "arn": arn,
+        "outcome": outcome,
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
 def leftovers():
     caller = aws_json("sts", "get-caller-identity")
     if caller["Account"] != ACCOUNT:
@@ -631,27 +679,15 @@ def leftovers():
             if v["InstanceProfileName"].startswith("lab-s1-")
         ],
     )
-    try:
-        providers = aws_json("iam", "list-open-id-connect-providers")["OpenIDConnectProviderList"]
-    except subprocess.CalledProcessError:
-        add(
-            "inventory-error",
-            [
-                {
-                    "operation": "iam:ListOpenIDConnectProviders",
-                    "conclusion": "OIDC absence unverified",
-                }
-            ],
-        )
-        providers = []
-    for oidc in providers:
-        detail = aws_json(
-            "iam", "get-open-id-connect-provider", "--open-id-connect-provider-arn", oidc["Arn"]
-        )
-        if any(
-            t["Key"] == "experiment" and t["Value"] == "s1" for t in detail.get("Tags", [])
-        ) or detail["Url"] == saved.get("cluster_oidc_issuer", "").removeprefix("https://"):
-            add("oidc-provider", [oidc])
+    issuer = saved.get("cluster_oidc_issuer")
+    if issuer:
+        check = oidc_evidence(issuer)
+        STATE.mkdir(parents=True, exist_ok=True)
+        (STATE / "oidc-evidence.json").write_text(json.dumps(check, indent=2))
+        if check["outcome"] == "present":
+            add("oidc-provider", [check])
+        elif check["outcome"] != "absent":
+            add("inventory-error", [check])
     add(
         "canary-bucket",
         [

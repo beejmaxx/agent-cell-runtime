@@ -14,24 +14,18 @@ No apply/destroy has occurred. The operator IP comes from
 `curl --noproxy '*' https://checkip.amazonaws.com`, following Mock Workday's
 existing direct-egress detection. A changed IP requires a new plan.
 
-The initial review contains two alternatives because the spec does not yet
-choose an STS endpoint policy:
+The reviewer approved the **76-addition, zero-change, zero-deletion** plan
+with `sts:GetCallerIdentity` only and DNS `BLOCK/NXDOMAIN`. The selected saved
+plan is `.local/s1/plan-sts-identity.tfplan`; the full-policy alternative is not
+approved. If startup fails, use CloudTrail/query-log evidence to add only a
+minimum observed STS action or exact blocked DNS chain target. Record every
+change as an experiment finding; never silently broaden to full access or
+wildcard DNS names.
 
-- `.local/s1/plan-sts-identity.tfplan`: `sts:GetCallerIdentity` only;
-- `.local/s1/plan-sts-default.tfplan`: AWS's default full endpoint policy.
-
-Both have **76 additions, zero changes, zero deletions**. The alternatives
-otherwise have identical planned resource values. Neither is selected for
-apply. Their text logs, JSON renderings, input files and review hashes are
-under `.local/s1/`. Review must settle the STS policy and the proposed
-DNS `BLOCK/NXDOMAIN` response. The narrow STS alternative is a proposal,
-not a verified Fargate requirement. No extra STS IAM authority is granted
-by an endpoint policy: callers still need service authorization.
-
-After choosing the baseline, `make s1-plan` uses
-`S1_STS_GET_CALLER_IDENTITY_ONLY=true` or `false` to create the canonical
-`.local/s1/plan.tfplan` and review metadata. Review the regenerated plan before
-apply, particularly if the direct operator IP or sources have changed.
+`make s1-plan` uses `S1_STS_GET_CALLER_IDENTITY_ONLY=true`. Recheck any regenerated
+plan against the approved resource changes and direct operator IP before apply.
+The checkpoint-4 authorization covers the approved plan and evidence-driven
+adjustments described in the spec.
 
 ## Resources and boundaries
 
@@ -109,10 +103,9 @@ service roles and endpoint connections. Exported local evidence is intentional.
   behavior and all lifecycle tests remain E1 findings until actually run.
   EC2's optional endpoint is intentionally absent per the spec.
 - The project SCP currently explicitly denies `iam:ListOpenIDConnectProviders`.
-  E9's OIDC-absence check is therefore **unverified**, even though the plan
-  creates no IAM OIDC provider. The inventory command records that error and
-  exits nonzero; it never equates an authorization failure with an empty list.
-  Resolve this visibility gap or agree on alternative E9 evidence before apply.
+  The approved alternative queries `GetOpenIDConnectProvider` for the exact ARN
+  derived from the recorded cluster issuer. Only `NoSuchEntity` proves absence;
+  authorization failures remain incomplete. Evidence is retained locally.
 - The current Free plan is active with $200 remaining credits. Planning does
   not verify that every create action/quota will succeed. The spec's running
   estimate is roughly $0.20–0.25/hour plus usage; it is not a spending cap.

@@ -145,6 +145,10 @@ def test_ISO_1_inventory_denial_cannot_report_clean(monkeypatch, tmp_path):
     import subprocess
 
     monkeypatch.setattr(s1, "STATE", tmp_path)
+    (tmp_path / "connection.json").write_text(
+        json.dumps({"cluster_oidc_issuer": "https://oidc.eks.us-east-2.amazonaws.com/id/SYNTHETIC"})
+    )
+    monkeypatch.setattr(s1, "oidc_evidence", lambda issuer: {"outcome": "unverified"})
     calls = []
     keys = {
         "get-resources": "ResourceTagMappingList",
@@ -194,9 +198,40 @@ def test_ISO_1_inventory_denial_cannot_report_clean(monkeypatch, tmp_path):
         {
             "kind": "inventory-error",
             "value": {
-                "operation": "iam:ListOpenIDConnectProviders",
-                "conclusion": "OIDC absence unverified",
+                "outcome": "unverified",
             },
         }
     ]
     assert calls[-1][:2] == ("ecr", "describe-repositories")
+
+
+@pytest.mark.parametrize(
+    "code,error,outcome",
+    [
+        (254, "An error occurred (NoSuchEntity) when calling GetOpenIDConnectProvider", "absent"),
+        (
+            254,
+            "An error occurred (AccessDenied) when calling GetOpenIDConnectProvider",
+            "unverified",
+        ),
+        (0, "", "present"),
+    ],
+)
+def test_ISO_1_exact_issuer_oidc_evidence(monkeypatch, code, error, outcome):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(returncode=code, stdout="{}", stderr=error)
+
+    monkeypatch.setattr(s1.subprocess, "run", run)
+    result = s1.oidc_evidence("https://oidc.eks.us-east-2.amazonaws.com/id/SYNTHETIC")
+    assert result["outcome"] == outcome
+    assert (
+        result["arn"]
+        == f"arn:aws:iam::{s1.ACCOUNT}:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/SYNTHETIC"
+    )
+    assert "get-open-id-connect-provider" in calls[0]
+    assert "list-open-id-connect-providers" not in calls[0]
