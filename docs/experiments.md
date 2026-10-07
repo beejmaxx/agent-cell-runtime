@@ -119,3 +119,39 @@ per-Pod status JSON. No bearer credentials or Pod env values are saved there.
 Each cluster test ended with no Pods in agent-exec; temporary control namespaces
 were deleted. The two marked lab namespaces, service accounts, Role,
 RoleBinding, quota, and local image remain available. No push was performed.
+
+## 2026-10-08 — S1 checkpoint-2 local regression comparison (unresolved)
+
+This is local test evidence, not an S1 AWS experiment. The reviewer requested
+one baseline run with an approximately 20-minute investigation cap.
+
+- **Baseline `bb4f05b`:** an unmodified detached worktree, a separate locked
+  Python environment, and its original rebuilt agent image. `make test-k8s`
+  passed its preflight and **18 tests** in **304.18 seconds**.
+- **Checkpoint-2 `024b024`:** immediately afterwards, rebuilt its agent image
+  and ran the same target. Preflight passed; **9 tests passed, 1 failed** in
+  **285.20 seconds**, stopping at `test_LC_8_kubelet_deadline_without_reconciler`.
+  The Pod was not observed in `Failed/DeadlineExceeded` within 60 seconds.
+- **Unmodified isolated LC-8 retry:** **1 failed, 1 teardown error** in
+  **170.78 seconds**. Teardown's namespace read received a server timeout.
+
+Both checkouts used Colima default (aarch64, 2 CPUs, 2 GiB, k3s 1.35), pinned
+kubectl 1.35, and local Mock Workday running alongside the existing shared
+workloads. No test timeout or VM resource setting was changed. Host load was
+not controlled: its one-minute average was about 11 during the baseline and
+rose to about 109 later in the comparison.
+
+For the failed full-run LC-8 Pod, saved events show start at 17:40:59 UTC,
+`DeadlineExceeded` at 17:41:53, and `Killing` at 17:42:29; its last captured
+phase was still Running. This establishes delayed deadline/termination
+observation, not its cause. The earlier happy-path and LC-6 cleanup failures
+did not recur in either full run. **The baseline passed and the current
+checkout failed: a checkpoint-2 regression has not been ruled out or fixed.**
+Resource pressure is a hypothesis, not a verified explanation. Investigation
+stopped within the requested cap; assertions were not relaxed.
+
+Evidence is retained locally under `.local/s1/`: `baseline-bb4f05b.log`,
+`baseline-bb4f05b-summary.json`, `baseline-environment.txt`, `baseline-evidence/`,
+`current-comparison.log`, `current-comparison-summary.json`,
+`current-lc8-isolated.log`, and `current-lc8-events.json`. The temporary worktree
+was removed after exporting its sanitized evidence. No AWS resources changed.
