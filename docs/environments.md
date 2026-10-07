@@ -33,22 +33,22 @@ A leftover check after every destroy confirms nothing billable remains.
 
 ## Infrastructure layout
 
-One set of modules; environments are thin compositions, never copies:
+Layers per account, each with its own state:
 
 ```text
-infra/
-  modules/
-    network/
-    mock-workday/
-    runtime/
-    eks/
-    iam/
-  envs/
-    dev/
-    prod/
+per account (dev, prod)
+├── bootstrap      this account's state bucket (persistent; one per account, never shared)
+├── platform       network (persistent); EKS cluster later (disposable)
+├── mock-workday   registry (persistent); ECS, RDS and load balancer (disposable)
+└── runtime        IAM roles, S3, KMS, SQS (mostly persistent); controller and gateway on EKS (disposable)
 ```
 
-Each environment has its own state and its own AWS CLI profile.
+- **Platform stacks** live in this repository under `infra/platform/envs/<env>/`.
+- **Mock Workday's stacks** live in its own repository, like another team's service.
+- Stacks share values through SSM parameters (for example `/lab/dev/network/*`), not through each other's state.
+- **Modules are environment-neutral:** dev-only behavior (test admin, shell access) is controlled by variables that default to off. Environments are thin compositions, never copies.
+- **Promotion:** prod runs the exact image digest verified in dev. Images are built once and promoted by digest, never rebuilt.
+- **Each account has its own state bucket and AWS CLI profile.** Prod state never lives in the dev account.
 
 ## IAM learning happens in the runtime itself
 
@@ -84,6 +84,6 @@ Real IAM/STS/EKS tests as they arise
 Prod account once dev deployment is reproducible
 ```
 
-## Open decision
+## Decided: Mock Workday placement
 
-Where Mock Workday's AWS deployment lives and how it connects to the runtime's network is to be decided before the dev baseline.
+Mock Workday deploys into the platform's dev network as its own stacks, from its own repository (spec: `mock-workday/docs/d1-aws-dev.md`). When the runtime gateway runs in the same VPC, Mock Workday gains a private path from the gateway's security group. Its public load balancer stays restricted to the operator's IP.
