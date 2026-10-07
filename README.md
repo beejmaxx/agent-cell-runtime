@@ -125,6 +125,37 @@ Keep the database and Mock Workday configuration from the local setup above.
 `make k8s-down` tears down only the two marked namespaces. The local image and
 ignored connection/evidence files remain.
 
+## S1 code preparation
+
+`create_completion_app(runtime)` exposes only
+`POST /api/v1/executions/{id}/complete`. It shares the runtime's live state and
+completion handler, including execution-credential authentication, the 64 KiB
+result limit, replay handling, and cleanup. It has no OpenAPI, documentation,
+health, or control-plane routes. The local k8s harness now serves this app on a
+separate listener and directs agent callbacks there.
+
+The EKS Pod template requires `K8S_PROFILE=eks` and a sha256 digest in the S1 ECR
+repository. Its CPU/memory requests match the existing limits (250m/128Mi), as
+Fargate requires. The Colima template remains unchanged. At checkpoint 4,
+`uv run python scripts/s1_image.py` builds for `linux/amd64`, publishes to the
+already-provisioned, S1-tagged repository, pulls the digest to verify image
+identity, and writes `.local/s1/image.json` with the digest and environment-name
+baseline. It does not create a repository. Registry credentials are temporary.
+
+The fake agent also supports `probe` (explicit TCP/HTTP targets, metadata and
+direct-resolver DNS probes), `listen` (a peer HTTP positive control), and `binding`
+(try its own completion credential against another execution, then complete
+itself). `inspect` includes boot ID and kernel release and reaches the Kubernetes
+API by its injected service IP with verified TLS, without requiring CoreDNS.
+Probe results distinguish transport failures from HTTP rejection; response bodies
+and credential values are never included in evidence. A DNS response, including
+NXDOMAIN, is not evidence of blocking: E6 still requires query logs and the
+firewall-removal control.
+
+Checkpoint 2 is still in progress. The EKS harness execution location and its
+operator-only administrative path require a spec clarification before they can
+be wired together. No S1 infrastructure has been provisioned or experiments run.
+
 ## License
 
 [MIT](LICENSE)

@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass
 
 
@@ -15,6 +16,17 @@ class Settings:
     agent_image: str = "agent-runtime/fake-agent:r2"
     runtime_url: str = "http://192.168.5.2:8000"
     max_active_executions: int = 3
+    k8s_profile: str = "colima"
+
+    def __post_init__(self):
+        if self.k8s_profile not in {"colima", "eks"}:
+            raise ValueError("K8S_PROFILE must be colima or eks")
+        if self.k8s_profile == "eks" and not re.fullmatch(
+            r"729608197929\.dkr\.ecr\.us-east-2\.amazonaws\.com/agent-runtime/fake-agent"
+            r"@sha256:[0-9a-f]{64}",
+            self.agent_image,
+        ):
+            raise ValueError("S1 requires the experiment ECR repository pinned by sha256 digest")
 
     @classmethod
     def from_env(cls):
@@ -28,6 +40,7 @@ class Settings:
             k8s_namespace=os.getenv("K8S_NAMESPACE", cls.k8s_namespace),
             agent_image=os.getenv("AGENT_IMAGE", cls.agent_image),
             runtime_url=os.getenv("RUNTIME_URL", cls.runtime_url),
+            k8s_profile=os.getenv("K8S_PROFILE", cls.k8s_profile),
             max_active_executions=int(
                 os.getenv("MAX_ACTIVE_EXECUTIONS", cls.max_active_executions)
             ),

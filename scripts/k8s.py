@@ -12,25 +12,65 @@ from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 KUBECTL = ROOT / ".local/bin/kubectl"
-STATE = ROOT / ".local/k8s"
+PROFILE = os.getenv("K8S_PROFILE", "colima")
+if PROFILE not in {"colima", "eks"}:
+    raise ValueError("K8S_PROFILE must be colima or eks")
+STATE = ROOT / (".local/s1" if PROFILE == "eks" else ".local/k8s")
+EKS_ARN = "arn:aws:eks:us-east-2:729608197929:cluster/lab-exec-s1"
 VERSION = "v1.35.0"
 NAMESPACES = ("agent-runtime", "agent-exec")
 MARKER = "lab.agent-runtime/owned"
 IMAGE = "agent-runtime/fake-agent:r2"
 
 
-def kubectl(*args):
+def context():
+    return EKS_ARN if PROFILE == "eks" else "colima"
+
+
+def image_metadata():
+    value = json.loads((STATE / "image.json").read_text())
+    from agent_runtime.config import Settings
+
+    Settings("unused", k8s_profile="eks", agent_image=value["image"])
+    if value["architecture"] != "amd64" or value["os"] != "linux":
+        raise RuntimeError("S1 requires a verified linux/amd64 image")
+    return value
+
+
+def image():
+    return image_metadata()["image"] if PROFILE == "eks" else IMAGE
+
+
+def kubectl_args(*args):
     binary = str(KUBECTL) if KUBECTL.exists() else shutil.which("kubectl")
     if not binary:
         raise RuntimeError("kubectl is needed to verify the existing Colima configuration")
-    return subprocess.check_output([binary, "--context", "colima", *args], text=True)
+    return [binary, "--context", context(), *args]
+
+
+def kubectl(*args):
+    return subprocess.check_output(kubectl_args(*args), text=True)
 
 
 def guard():
-    if kubectl("config", "current-context").strip() != "colima":
-        raise RuntimeError("Refusing a current context other than colima")
+    if kubectl("config", "current-context").strip() != context():
+        raise RuntimeError(f"Refusing a current context other than {context()}")
     config = json.loads(kubectl("config", "view", "--minify", "--flatten", "--raw", "-o", "json"))
     cluster = config["clusters"][0]["cluster"]
+    if PROFILE == "eks":
+        expected = json.loads((STATE / "cluster.json").read_text())
+        if (
+            expected["arn"] != EKS_ARN
+            or config["clusters"][0]["name"] != EKS_ARN
+            or cluster["server"] != expected["endpoint"]
+            or cluster.get("certificate-authority-data") != expected["certificateAuthority"]["data"]
+            or cluster.get("insecure-skip-tls-verify")
+            or cluster.get("proxy-url")
+        ):
+            raise RuntimeError(
+                "EKS context does not match the recorded S1 cluster ARN, endpoint and CA"
+            )
+        return cluster
     if urlparse(cluster["server"]).hostname not in {"127.0.0.1", "localhost"}:
         raise RuntimeError("Refusing a non-loopback Kubernetes API URL")
     return cluster
@@ -64,6 +104,8 @@ def tools():
 
 
 def token(cluster):
+    if PROFILE == "eks":
+        raise RuntimeError("EKS controller tokens must be issued by the trusted-host role")
     require_owned()
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(STATE, 0o700)
@@ -82,6 +124,8 @@ def token(cluster):
 
 def main():
     command = sys.argv[1]
+    if PROFILE == "eks" and command in {"up", "down", "token"}:
+        raise RuntimeError("EKS harness administration awaits the S1 operator-path decision")
     cluster = guard()
     if command == "tools":
         tools()
@@ -101,6 +145,8 @@ def main():
         for name in NAMESPACES:
             print(kubectl("delete", "namespace", name, "--ignore-not-found"), end="")
     elif command == "image":
+        if PROFILE == "eks":
+            raise RuntimeError("Use scripts/s1_image.py at checkpoint 4 to publish the S1 image")
         subprocess.run(
             ["docker", "--context", "colima", "build", "-t", IMAGE, str(ROOT / "agent")], check=True
         )

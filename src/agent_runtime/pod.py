@@ -4,6 +4,7 @@ from agent_runtime.db import canonical
 
 
 def pod_manifest(name, spec, settings):
+    eks = getattr(settings, "k8s_profile", "colima") == "eks"
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -29,7 +30,7 @@ def pod_manifest(name, spec, settings):
                 {
                     "name": "agent",
                     "image": settings.agent_image,
-                    "imagePullPolicy": "Never",
+                    "imagePullPolicy": "IfNotPresent" if eks else "Never",
                     "env": [
                         {"name": name, "value": value}
                         for name, value in {
@@ -45,7 +46,11 @@ def pod_manifest(name, spec, settings):
                         "capabilities": {"drop": ["ALL"]},
                     },
                     "resources": {
-                        "requests": {"cpu": "50m", "memory": "64Mi", "ephemeral-storage": "16Mi"},
+                        "requests": {
+                            "cpu": "250m" if eks else "50m",
+                            "memory": "128Mi" if eks else "64Mi",
+                            "ephemeral-storage": "16Mi",
+                        },
                         "limits": {"cpu": "250m", "memory": "128Mi", "ephemeral-storage": "64Mi"},
                     },
                     "volumeMounts": [
