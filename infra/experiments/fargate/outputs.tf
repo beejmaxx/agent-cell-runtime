@@ -11,7 +11,7 @@ output "connection" {
     controller_role_arn       = aws_iam_role.controller.arn
     harness_role_arn          = aws_iam_role.harness.arn
     fargate_role_arn          = aws_iam_role.fargate.arn
-    operator_role_arn         = var.operator_role_arn
+    operator_principal_arn    = var.operator_principal_arn
     host_instance_id          = aws_instance.host.id
     host_private_ip           = aws_instance.host.private_ip
     host_security_group_id    = aws_security_group.host.id

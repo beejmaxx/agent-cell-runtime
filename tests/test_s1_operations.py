@@ -34,7 +34,7 @@ def test_ISO_1_teardown_state_isolation(monkeypatch, tmp_path, key):
         "aws_json",
         lambda *args: {
             "Account": s1.ACCOUNT,
-            "Arn": f"arn:aws:sts::{s1.ACCOUNT}:assumed-role/AccountFullAccessRole/synthetic",
+            "Arn": s1.OPERATOR,
         },
     )
     if key != s1.KEY:
@@ -271,3 +271,37 @@ def test_ISO_1_tag_index_requires_authoritative_absence(monkeypatch, tmp_path):
     )
     with pytest.raises(RuntimeError, match="ExpiredToken"):
         s1.live_tagged_resources(entries)
+
+
+@pytest.mark.parametrize(
+    "arn",
+    [
+        s1.OPERATOR,
+        f"arn:aws:iam::{s1.ACCOUNT}:user/lab-operator-cli-extra",
+        f"arn:aws:iam::{s1.ACCOUNT}:root",
+        f"arn:aws:sts::{s1.ACCOUNT}:assumed-role/AccountFullAccessRole/synthetic",
+        f"arn:aws:sts::{s1.ACCOUNT}:assumed-role/lab-s1-controller/synthetic",
+        f"arn:aws:sts::{s1.ACCOUNT}:assumed-role/s1-harness/synthetic",
+        "arn:aws:iam::000000000000:user/lab-operator-cli",
+    ],
+)
+def test_ISO_1_operator_identity_is_exact(monkeypatch, tmp_path, arn):
+    monkeypatch.setattr(s1, "TF", tmp_path)
+    (tmp_path / ".terraform").mkdir()
+    (tmp_path / ".terraform/terraform.tfstate").write_text(
+        json.dumps(
+            {
+                "backend": {
+                    "type": "s3",
+                    "config": {"bucket": s1.BUCKET, "key": s1.KEY, "region": s1.REGION},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(s1, "terraform", lambda *a, **kw: "default")
+    monkeypatch.setattr(s1, "aws_json", lambda *a: {"Account": s1.ACCOUNT, "Arn": arn})
+    if arn == s1.OPERATOR:
+        s1.state_guard()
+    else:
+        with pytest.raises(RuntimeError, match="Expected the S1 operator"):
+            s1.state_guard()

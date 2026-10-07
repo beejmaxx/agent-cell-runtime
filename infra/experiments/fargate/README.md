@@ -12,7 +12,7 @@ from the foundation/bootstrap directories as part of S1.
 The first checkpoint-4 apply was blocked by PrivateLink rejecting the operator
 ARN's `/managed/` IAM path. The reviewer approved this account's root ARN as the
 service principal, with acceptance required for only the Terraform-created
-endpoint ID. The operator identity remains unchanged; its path no longer blocks
+endpoint ID. The approved operator is now IAM user `lab-operator-cli`; the former role path no longer blocks
 `s1-up`. Regenerate the saved plan before retrying; the original plan contains
 the rejected principal. See `docs/experiments.md` for the attempt and outstanding
 cleanup evidence. The operator IP comes from
@@ -39,7 +39,7 @@ adjustments described in the spec.
 - EKS 1.36, API access entries only, no bootstrap creator grant, self-managed
   add-ons, CoreDNS, node groups, IAM OIDC provider or Pod Identity association.
   One Fargate profile selects `agent-exec` in 2a only.
-- Four caller roles remain distinct: existing operator, controller/instance
+- Four caller identities remain distinct: existing operator IAM user, controller/instance
   role, Fargate Pod execution role and test-only `s1-harness`. The latter has
   AmazonEKSAdminPolicy only in `agent-exec` and `agent-exec-psa-control`.
   EKS's service role and two service-linked roles are separate infrastructure

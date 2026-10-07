@@ -30,12 +30,12 @@ variable "operator_cidr" {
     error_message = "Only one IPv4 /32 is allowed."
   }
 }
-variable "operator_role_arn" {
+variable "operator_principal_arn" {
   type    = string
-  default = "arn:aws:iam::729608197929:role/managed/AccountFullAccessRole"
+  default = "arn:aws:iam::729608197929:user/lab-operator-cli"
   validation {
-    condition     = var.operator_role_arn == "arn:aws:iam::729608197929:role/managed/AccountFullAccessRole"
-    error_message = "Use the verified operator role, never a host or execution role."
+    condition     = var.operator_principal_arn == "arn:aws:iam::729608197929:user/lab-operator-cli"
+    error_message = "Use exactly the approved lab-operator-cli IAM user, never a host or execution role."
   }
 }
 locals {

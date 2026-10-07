@@ -125,13 +125,13 @@ Whether the kubelet shares the agent's network namespace is not a design depende
 
 - **DNS is an egress channel that security groups cannot close.** The Pod can always send queries to the VPC resolver. DNS Firewall, associated with the execution VPC only, applies an allowlist. Query logging records queries the resolver processes and the firewall's action, but not queries answered from its cache, so every probe uses a fresh name.
 - **Execution Pod security group rules** (the cluster SG is not attached): egress TCP 443 to the cluster SG, with the cluster SG admitting TCP 443 from the Pod SG; the cluster SG may reach the Pod on TCP 10250 (kubelet: logs, exec). No port 53 rules: there is no CoreDNS. AWS publishes no validated "no CoreDNS" minimum, so a Pod that fails to start with these rules is a finding, not a reason to attach the whole cluster SG.
-- **Four distinct authority roles (the fourth is test scaffolding):**
+- **Four distinct authority identities (the fourth is test scaffolding):**
   - the **controller role** (trusted host): its EKS access entry maps it to the namespaced Role only; no IAM, network, or EKS access-entry administration permissions. For S1 tests only, it may `sts:AssumeRole` the `s1-harness` role;
   - the **Fargate Pod execution role**: ECR pull of one repository; trust limited to this cluster's Fargate profile (§0);
-  - the **operator/Terraform role**: everything else, never present on the trusted host or in the execution domain;
+  - the **operator/Terraform IAM user** (`arn:aws:iam::729608197929:user/lab-operator-cli`): everything else, never present on the trusted host or in the execution domain;
   - **`s1-harness` (test scaffolding, absent from production):** its trust policy allows only the trusted-host/controller instance role. Its EKS access entry has **`AmazonEKSAdminPolicy` scoped to exactly `agent-exec` and `agent-exec-psa-control`**, never cluster scope. LC-7 deletes/restores a RoleBinding; `AmazonEKSEditPolicy` lacks the necessary RBAC permissions. ISO-5 dry-runs control Pods in the operator-pre-created `agent-exec-psa-control` namespace, which has **no Pod Security Admission labels** and is not created/deleted by the EKS harness. The Colima profile may retain its temporary namespace. The operator also pre-creates the control service account. Runtime/controller calls always retain the controller identity; only admin test calls use `s1-harness`.
 
-  **Rationale (reviewer-approved):** S1's attacker is an execution, with no path to the trusted host. These admin actions are test-only and namespace-scoped on that host. This exception is not a production authority model. EKS's separate service role for managing the control plane and its required EKS/Fargate service-linked roles are infrastructure, not these four caller roles. Terraform owns newly required service roles so they are removed during S1 teardown; pre-existing shared service roles are not adopted or destroyed.
+  **Rationale (reviewer-approved):** S1's attacker is an execution, with no path to the trusted host. These admin actions are test-only and namespace-scoped on that host. This exception is not a production authority model. EKS's separate service role for managing the control plane and its required EKS/Fargate service-linked roles are infrastructure, not these four caller identities. Terraform owns newly required service roles so they are removed during S1 teardown; pre-existing shared service roles are not adopted or destroyed.
 - **IAM to Kubernetes identity:** EKS access entries map an IAM role to Kubernetes groups. The controller's role maps to group `agent-runtime-controllers`, bound to the same namespaced Role as R2 (Pods in `agent-exec` only). It authenticates with `aws eks get-token`: a presigned STS request. The token file is refreshed by a small loop, because R2's backend re-reads it on every request.
 - **The API endpoint is reachable from the VPC.** With private endpoint access, the API server has network interfaces in the VPC. Whatever Fargate requires for control-plane connectivity, the agent's real reachability is **measured**. If it can reach the API, it is authenticated (and rejected) like any caller, and that exposure is recorded, not assumed away.
 
@@ -193,7 +193,7 @@ Each experiment has a pass condition, evidence, and a control showing it could f
 | E6 | DNS filtering | Query the VPC resolver **directly** (VPC base +2), not through `/etc/resolv.conf`, which points at a CoreDNS that doesn't exist. Query a fresh random name (new for every attempt, so the resolver cache cannot hide it) under a real public domain outside the allowlist, and an allowlisted AWS name. Test the test: detach the DNS Firewall association and repeat. | With the firewall: the query log shows the random name with action `BLOCK`, and the AWS name resolves. Without it: the resolver processes the random name and forwards it. **Claim scope:** DNS Firewall blocks non-allowlisted public names at the VPC resolver. Proving that an attacker's authoritative server sees nothing needs a domain we control and observe; that is optional and not in S1. |
 | E7 | Identity and credentials (ID-8, ISO-1) | `inspect`: environment variable names (`AWS_*`, `AWS_CONTAINER_CREDENTIALS_*`, `AWS_WEB_IDENTITY_TOKEN_FILE`), mounts and projected volumes, `169.254.169.254` and `169.254.170.2`, and the projected-token claims | No unintended credentials are injected, and none are obtained through the enumerated application-accessible paths (paired with the admitted Pod spec, service-account configuration, role policies, and effective network configuration); a reachable endpoint that yields no credentials is recorded as such, not as a leak. The token claims match R2. **Positive control:** the private image starts, so Fargate's infrastructure used the Pod execution role to pull it, while the application container could not obtain that role. |
 | E8 | P1 assume-breach (ISO-9, P1 only) | An execution variant with the maximum privileges Fargate admits for this namespace (records what is rejected), enumerating credentials, network, and APIs | Nothing beyond its own execution's credential and the permitted paths. Records exactly which privileges the variant gained over the ordinary template (under the same admission policy, possibly almost none). Root in the container is not guest-kernel control: reported as **P1 evidence only.** |
-| E9 | Static IAM and configuration review | From the Terraform plan and `describe`/`get` calls after apply | No IAM OIDC provider exists for the cluster's issuer (no IRSA). Because listing is SCP-denied, query `GetOpenIDConnectProvider` for `arn:aws:iam::729608197929:oidc-provider/<cluster issuer without https://>`; `NoSuchEntity` proves absence for this issuer, while an authorization failure is unverified. Record the exact evidence. The Pod execution role trusts only `eks-fargate-pods.amazonaws.com` with `ArnLike aws:SourceArn = arn:aws:eks:us-east-2:<account>:fargateprofile/lab-exec-s1/agent-exec/*`, and its permissions are ECR pull on the one repository. No trusted-domain role (controller, trusted host) is assumable by any execution-side principal. Endpoint policies match §1. Verify the endpoint service allows only `arn:aws:iam::729608197929:root`, requires acceptance, and has exactly the Terraform-created callback endpoint ID accepted; no other connection is accepted. The execution Pod ENI has exactly the expected security groups. The four authority roles are distinct and match §1. `s1-harness` trusts only the controller instance role; its only EKS policy is `AmazonEKSAdminPolicy` with namespace scope exactly `[agent-exec, agent-exec-psa-control]`, never cluster scope. Check the control namespace has no PSA labels and that the runtime identity has no harness access policy. |
+| E9 | Static IAM and configuration review | From the Terraform plan and `describe`/`get` calls after apply | No IAM OIDC provider exists for the cluster's issuer (no IRSA). Because listing is SCP-denied, query `GetOpenIDConnectProvider` for `arn:aws:iam::729608197929:oidc-provider/<cluster issuer without https://>`; `NoSuchEntity` proves absence for this issuer, while an authorization failure is unverified. Record the exact evidence. The Pod execution role trusts only `eks-fargate-pods.amazonaws.com` with `ArnLike aws:SourceArn = arn:aws:eks:us-east-2:<account>:fargateprofile/lab-exec-s1/agent-exec/*`, and its permissions are ECR pull on the one repository. No trusted-domain role (controller, trusted host) is assumable by any execution-side principal. Endpoint policies match §1. Verify the endpoint service allows only `arn:aws:iam::729608197929:root`, requires acceptance, and has exactly the Terraform-created callback endpoint ID accepted; no other connection is accepted. The execution Pod ENI has exactly the expected security groups. The four authority identities are distinct and match §1. `s1-harness` trusts only the controller instance role; its only EKS policy is `AmazonEKSAdminPolicy` with namespace scope exactly `[agent-exec, agent-exec-psa-control]`, never cluster scope. Check the control namespace has no PSA labels and that the runtime identity has no harness access policy. |
 | E10 | Authority at the destination | Live, through PrivateLink: execution A's credential completes A (positive control); A's credential against execution B, while B is RUNNING, is rejected and B is unchanged | A network path alone is not the boundary: the destination must also enforce per-execution authority. |
 
 ## 5. Cost and teardown
@@ -300,8 +300,7 @@ E2's numbers are judged by the user against the product need.
 ### PrivateLink reviewer correction (2026-10-08)
 
 The account principal and exact-endpoint acceptance in §1 replace the rejected
-operator-role principal. Keep the existing operator identity and four authority
-roles; do not add a pathless operator role. This is an approved configuration
+operator-role principal. Keep four distinct authority identities; do not add a pathless operator role. This is an approved configuration
 correction, not evidence of a successful live connection. The first attempt's
 OIDC visibility and cleanup findings remain outstanding.
 
@@ -317,3 +316,22 @@ no resource leftovers with this explicit exception; other inventory errors,
 including expired credentials, remain failures. Finish prior cleanup before
 retrying, record credential expiry before apply, and reserve time for teardown.
 If credentials expire during the run, stop and notify the reviewer immediately.
+
+
+### Operator identity update (2026-10-08)
+
+At the reviewer’s request, the local `agent-runtime` profile now uses static,
+non-expiring credentials for `arn:aws:iam::729608197929:user/lab-operator-cli`
+with AdministratorAccess. S1 does not create or manage this user or its keys.
+`operator_principal_arn` and the operator caller guard accept exactly this ARN;
+the EKS operator access entry uses it. Operator credentials remain local and
+are never transferred to the trusted host or execution Pods. The PrivateLink
+account-root permission and exact-endpoint acceptance are unchanged. The
+previous login access-token expiry was a 15-minute rotation, not session end;
+credential-expiry planning is no longer needed for this approved profile.
+
+Teardown explicitly checks the recorded EKS-created cluster security group
+after cluster deletion. If it remains, confirm the group’s S1 cluster ownership,
+execution VPC, and absence of attached ENIs before deleting it; Terraform’s
+execution VPC deletion must then complete. `s1-leftovers` checks the recorded
+cluster group ID even when it lacks experiment tags.

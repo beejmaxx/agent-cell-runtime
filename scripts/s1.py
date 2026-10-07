@@ -22,7 +22,7 @@ STATE = ROOT / ".local/s1"
 BUCKET = "beejmaxx-lab-tfstate-dev"
 KEY = "dev/experiments/s1-fargate.tfstate"
 CLUSTER = "lab-exec-s1"
-OPERATOR = f"arn:aws:iam::{ACCOUNT}:role/managed/AccountFullAccessRole"
+OPERATOR = f"arn:aws:iam::{ACCOUNT}:user/lab-operator-cli"
 
 
 def aws_json(*args):
@@ -55,9 +55,7 @@ def state_guard():
     if terraform("workspace", "show", capture=True).strip() != "default":
         raise RuntimeError("S1 uses only the default workspace")
     caller = aws_json("sts", "get-caller-identity")
-    if caller["Account"] != ACCOUNT or not caller["Arn"].startswith(
-        f"arn:aws:sts::{ACCOUNT}:assumed-role/AccountFullAccessRole/"
-    ):
+    if caller["Account"] != ACCOUNT or caller["Arn"] != OPERATOR:
         raise RuntimeError("Expected the S1 operator, never the host or execution role")
 
 

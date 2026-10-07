@@ -61,7 +61,7 @@ resource "aws_eks_access_entry" "controller" {
 }
 resource "aws_eks_access_entry" "operator" {
   cluster_name  = aws_eks_cluster.execution.name
-  principal_arn = var.operator_role_arn
+  principal_arn = var.operator_principal_arn
   type          = "STANDARD"
 }
 resource "aws_eks_access_policy_association" "operator" {
