@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.aws/
+.kube/
+kubeconfig
+kubeconfig.*
+*.pem
+*.key
+
+# Infrastructure state and local plans
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+!*.example.tfvars
+crash.log
+
+# Local execution artifacts
+.local/
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+.DS_Store
