@@ -1,0 +1,19 @@
+[project]
+name = "agent-runtime"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.115", "uvicorn>=0.30", "sqlalchemy>=2.0", "psycopg[binary]>=3.2", "PyJWT[crypto]>=2.9", "httpx>=0.27"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires local Mock Workday HTTP service"]
+
+[tool.ruff]
+line-length = 100
