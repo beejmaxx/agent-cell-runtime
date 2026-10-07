@@ -155,3 +155,74 @@ Evidence is retained locally under `.local/s1/`: `baseline-bb4f05b.log`,
 `current-comparison.log`, `current-comparison-summary.json`,
 `current-lc8-isolated.log`, and `current-lc8-events.json`. The temporary worktree
 was removed after exporting its sanitized evidence. No AWS resources changed.
+
+## 2026-10-08 — S1 LC-8 commit comparison (inconclusive bisect)
+
+The reviewer requested LC-8 alone at three commits, rebuilding the agent image
+at each commit, with an approximately 30-minute diagnostic cap. Each detached
+worktree used its own locked Python 3.12 environment and pinned kubectl. The
+same Colima VM (2 CPUs, 2 GiB, shared workloads) stayed running throughout.
+Neither the 30-second Pod deadline nor the 60-second assertion wait changed.
+
+| Commit | Isolated LC-8 result | Pytest duration |
+|---|---|---|
+| `c21bc07` | 1 failed | 155.00 s |
+| `c4dfd6f` | 1 failed | 102.25 s |
+| `024b024` | 1 passed | 83.54 s |
+| `bb4f05b`, additional baseline with read-only request/state tracing | 1 failed | 125.72 s |
+| `c21bc07`, repeat with the same tracing | 1 passed | 75.52 s |
+
+All three failures were at `tests/test_k8s.py:204`, waiting for phase `Failed`:
+`Condition did not converge within 60 seconds`. They did not reach the
+`DeadlineExceeded` reason assertion. The first `c21bc07` run saved no Pod
+snapshot and had no new Pod events; its database state was not captured, so
+the launch outcome is unknown. The added tracing only observes requests and
+records selected database fields before teardown; it does not retry requests,
+change reconciliation, or include credentials.
+
+Verified Pod evidence (UTC):
+
+- `c4dfd6f`, Pod `exec-081865bf-d839-404b-8872-5ea25b27be14`: start
+  18:02:53, first deadline event 18:03:23, Killing 18:03:38. The last saved
+  phase was `Pending`, with no top-level reason, although its container state
+  was running and its readiness conditions said `PodFailed`. Deadline
+  detection occurred at 30 seconds; terminal-phase observation did not
+  converge before the assertion expired.
+- `024b024`, Pod `exec-4dfa19e1-9dd1-4508-bc72-58e9d594b534`: start
+  18:05:28, first deadline event 18:06:03, Killing 18:06:06, container exit
+  18:06:11. The saved phase/reason was `Failed/DeadlineExceeded`; LC-8 passed.
+- Baseline `bb4f05b`, Pod `exec-eb33cba6-32fa-4136-97ed-9306fc152f84`:
+  start 18:08:35, first deadline event 18:09:42 (67 seconds later), Killing
+  18:09:53. The last saved phase was `Running`, with no reason. Request tracing
+  recorded a successful list (200), create (201), one create call, zero delete
+  calls, and database state `RUNNING` at assertion failure. During cleanup,
+  `FailedSync` reported a Docker container-status lookup for a missing container.
+- The unchanged `c21bc07` repeat observed `Failed/DeadlineExceeded`, then
+  transitioned the database to `TIMED_OUT` after restarting reconciliation.
+
+The first failing commit in the requested order was `c21bc07`, but **it is not
+an established first bad commit**: it also passed unchanged, the latest code
+passed, and the pre-checkpoint baseline reproduced the failure. Kubelet logs
+showed slow housekeeping and unrelated health-probe timeouts before testing.
+At 18:08:30 UTC, the guest's one-minute load average was 11.44 and its CPU
+pressure `some avg60` was 90.27%. These verify cluster delays and contention;
+they do not isolate the cause of every failure or prove all checkpoint-2 code
+free of regressions. No speculative runtime fix or timeout increase was made.
+
+Local evidence: `.local/s1/bisect-summary.json`, `bisect-<commit>.log`,
+`bisect-<commit>-events.json`, `bisect-evidence/`, `trace-summary.json`,
+`trace-<commit>.log`, `trace-<commit>.json`, `trace-bb4f05b-events.json`,
+`diagnostics/lc8_trace.py`, `bisect-kubelet-*.log`, and `bisect-pressure.txt`.
+
+A final current-checkout image rebuild succeeded. `make test-k8s` then failed
+in preflight after 45.61 seconds: `httpx.ReadTimeout` on the Pod-create POST at
+`scripts/k8s_preflight.py:96`. **Zero suite tests ran; 18/18 has not been
+re-established.** Its logs are `bisect-current-full.log` and
+`bisect-current-full-summary.json`. Investigation stopped within the requested
+cap without a root-cause fix. Checkpoint 2 remains incomplete; the approved
+two-namespace harness-policy and pre-created control-namespace changes remain
+pending the regression gate. There is no new spec ambiguity.
+
+Cleanup verified an empty `agent-exec` namespace. The four temporary
+worktrees were removed after exporting their sanitized evidence; the current
+agent image was restored. No AWS resources were created or changed.
