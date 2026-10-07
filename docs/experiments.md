@@ -936,3 +936,31 @@ stopped after testing, preserving synthetic service data. No AWS operation or
 Kubernetes startup was performed. **LC-8 still requires re-verification on the
 next approved EKS run**; these local results are not an EKS pass. The kubelet
 backstop timing and startup-latency overrun remain as documented above.
+
+## 2026-10-08 — Automated S1 recovery, local validation only
+
+The reviewer requested automation of the two manual recoveries from the last
+run. `s1-up` now verifies the exact Terraform callback endpoint becomes Available,
+retries only its acceptance, and inspects per-resource Unsuccessful responses.
+`s1-down` now removes the recorded orphan cluster group only after verifying its
+cluster tag, account, recorded VPC, cluster absence, and zero attached ENIs.
+Both have bounded retries and fail closed. If an orphan blocked Terraform's VPC
+deletion, successful guarded cleanup permits one identical S1 destroy retry.
+The [S1 spec](s1-fargate-spec.md#automated-provisioning-and-teardown-recovery-2026-10-08)
+records the automated behavior and remaining Terraform timeout limitation.
+
+Verified locally at approximately 2026-10-07 22:50–22:52 UTC:
+
+- `uv run pytest tests/test_s1_operations.py tests/test_s1_recovery.py -q`:
+  **60 passed** in 0.22 s. Includes 34 new mocked recovery cases covering scoped
+  acceptance, availability, retry exhaustion, wrong IDs/VPCs/services, ownership
+  refusal, live clusters, attached ENIs, deletion errors, partial-apply inventory,
+  and workflow ordering. Raw output: `.local/s1/recovery-focused.log`.
+- `make test`: **281 passed, 22 deselected**, 51.04 s. Raw output:
+  `.local/s1/recovery-unit.log`. Existing Starlette/httpx deprecation warning only.
+- Ruff lint/format checks and `git diff --check` passed.
+
+No live AWS call, Terraform operation, Kubernetes startup, or integration-service
+startup was performed. API shapes were checked against the locally installed
+botocore service model; endpoint state casing also matches retained run evidence.
+Real recovery behavior remains to be verified on the next approved rebuild.

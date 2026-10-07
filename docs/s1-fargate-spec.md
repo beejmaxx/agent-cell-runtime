@@ -330,11 +330,10 @@ account-root permission and exact-endpoint acceptance are unchanged. The
 previous login access-token expiry was a 15-minute rotation, not session end;
 credential-expiry planning is no longer needed for this approved profile.
 
-Teardown explicitly checks the recorded EKS-created cluster security group
-after cluster deletion. If it remains, confirm the group’s S1 cluster ownership,
-execution VPC, and absence of attached ENIs before deleting it; Terraform’s
-execution VPC deletion must then complete. `s1-leftovers` checks the recorded
-cluster group ID even when it lacks experiment tags.
+Teardown automatically checks and deletes the recorded EKS-created cluster
+security group after the Terraform destroy attempt, using the ownership and
+attachment gates below. `s1-leftovers` still checks the recorded cluster group
+ID even when it lacks experiment tags.
 
 
 ### Provisioning corrections observed during retry (2026-10-08)
@@ -457,3 +456,44 @@ is still future, terminal receipt replay, time spent waiting for a row lock,
 and a real-clock stall before the conditional update. These are the trusted-side
 wall-clock rules behind the kubelet backstop. **LC-8 still needs re-verification
 on the next EKS run**; this local change is not an EKS pass.
+
+### Automated provisioning and teardown recovery (2026-10-08)
+
+**Reviewer-approved local hardening:** both recoveries previously performed
+manually are now automated by `scripts/s1.py`; these changes have mocked local
+tests, not a new AWS run.
+
+- After Terraform apply and its connection accepter, `s1-up` requires the exact
+  `gateway_endpoint_id` exported by Terraform to reach **Available** before
+  Kubernetes setup, image publishing, or host setup. It verifies the endpoint's
+  execution VPC and service against the recorded outputs. While PendingAcceptance,
+  it calls AcceptVpcEndpointConnections for **only that endpoint ID and service**,
+  explicitly inspects `Unsuccessful`, and retries with bounded backoff. While
+  Pending, it only polls. Failed/rejected or unexpected identities stop setup;
+  exhaustion reports the last state and unsuccessful response. A successful API
+  exit or empty `Unsuccessful` alone does not establish readiness. No other
+  endpoint request is accepted, and service permissions remain unchanged.
+- `s1-down` persists the cluster-created group ID and execution VPC before cluster
+  deletion, including after partial apply. Following the Terraform destroy
+  attempt, it deletes only that recorded group, and only when the cluster is
+  absent, the group's owner is the configured account, its VPC is the recorded
+  execution VPC, `aws:eks:cluster-name` is exactly `lab-exec-s1`, and a fresh ENI
+  query for that group is empty. Ownership and ENIs are rechecked before every
+  deletion attempt. ENI detachment and delete failures receive bounded retries;
+  wrong/missing identity or ownership fails closed. The script never detaches
+  ENIs, revokes rules itself, or deletes a group selected by name/tag search.
+  Deletion must be followed by authoritative absence. Refusal or exhaustion
+  leaves the recorded inventory intact and fails, directing the operator to
+  `s1-leftovers`; it never reports a clean teardown.
+- An orphan group can block Terraform's VPC deletion, as observed in the prior
+  run. If destroy failed and guarded cleanup removes the orphan, `s1-down`
+  retries the identical isolated S1 destroy once, then checks the group again
+  and runs `s1-leftovers`. A destroy failure without orphan removal is propagated.
+  This may still incur Terraform's own dependency timeout before recovery; it
+  requires no manual deletion. There is no change to state/approval guards.
+
+Each recovery uses ten attempts with delays `0, 1, 2, 4, 8, 16, 30, 30, 30, 30`
+seconds (151 seconds of scheduled backoff, excluding API call time). Endpoint
+acceptance has at most nine calls, reserving the final observation for readiness.
+The next approved rebuild must verify the real AWS behavior; local mocks prove
+call scoping, refusal, retry limits, and workflow ordering only.

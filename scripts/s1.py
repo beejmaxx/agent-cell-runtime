@@ -23,6 +23,7 @@ BUCKET = "beejmaxx-lab-tfstate-dev"
 KEY = "dev/experiments/s1-fargate.tfstate"
 CLUSTER = "lab-exec-s1"
 OPERATOR = f"arn:aws:iam::{ACCOUNT}:user/lab-operator-cli"
+RECOVERY_DELAYS = (0, 1, 2, 4, 8, 16, 30, 30, 30, 30)
 
 
 def aws_json(*args):
@@ -295,6 +296,129 @@ def upload_source(config):
     )
 
 
+def ensure_endpoint_available(config):
+    endpoint_id = config["gateway_endpoint_id"]
+    service_id = config["endpoint_service_id"]
+    services = aws_json(
+        "ec2", "describe-vpc-endpoint-service-configurations", "--service-ids", service_id
+    )["ServiceConfigurations"]
+    if len(services) != 1 or services[0]["ServiceId"] != service_id:
+        raise RuntimeError("Refusing an unexpected PrivateLink service")
+    service_name = services[0]["ServiceName"]
+    last_failure = None
+    state = None
+    for attempt, delay in enumerate(RECOVERY_DELAYS):
+        time.sleep(delay)
+        endpoints = aws_json("ec2", "describe-vpc-endpoints", "--vpc-endpoint-ids", endpoint_id)[
+            "VpcEndpoints"
+        ]
+        if len(endpoints) != 1 or (
+            endpoints[0].get("VpcEndpointId"),
+            endpoints[0].get("VpcId"),
+            endpoints[0].get("ServiceName"),
+        ) != (endpoint_id, config["execution_vpc_id"], service_name):
+            raise RuntimeError("Refusing an unexpected PrivateLink endpoint, VPC, or service")
+        state = endpoints[0]["State"].lower()
+        if state == "available":
+            return
+        if state not in {"pendingacceptance", "pending"}:
+            raise RuntimeError(f"S1 endpoint {endpoint_id} entered unexpected state {state}")
+        if state == "pendingacceptance" and attempt < len(RECOVERY_DELAYS) - 1:
+            response = aws_json(
+                "ec2",
+                "accept-vpc-endpoint-connections",
+                "--service-id",
+                service_id,
+                "--vpc-endpoint-ids",
+                endpoint_id,
+            )
+            # EC2 can report per-resource failure even when the API call succeeds.
+            failures = response["Unsuccessful"]
+            if any(item.get("ResourceId") != endpoint_id for item in failures):
+                raise RuntimeError("Acceptance returned an unexpected endpoint ID")
+            if failures:
+                last_failure = failures
+                print(
+                    f"S1 endpoint {endpoint_id} acceptance unsuccessful: {failures}",
+                    file=sys.stderr,
+                )
+    raise RuntimeError(
+        f"S1 endpoint {endpoint_id} did not become Available: state={state}, "
+        f"last Unsuccessful={last_failure}"
+    )
+
+
+def cleanup_cluster_security_group(config):
+    if not config:
+        return False
+    group_id = config.get("cluster_security_group_id")
+    vpc_id = config.get("execution_vpc_id")
+    if not group_id or not vpc_id or config.get("cluster_name") != CLUSTER:
+        raise RuntimeError("Missing recorded S1 cluster group/VPC identity; run s1-leftovers")
+    observed = False
+    last_failure = None
+    for delay in RECOVERY_DELAYS:
+        time.sleep(delay)
+        if CLUSTER in aws_json("eks", "list-clusters")["clusters"]:
+            raise RuntimeError("Refusing cluster security group cleanup while S1 cluster exists")
+        groups = aws_json(
+            "ec2", "describe-security-groups", "--filters", f"Name=group-id,Values={group_id}"
+        )["SecurityGroups"]
+        if not groups:
+            return observed
+        if len(groups) != 1:
+            raise RuntimeError("Unexpected cluster security group inventory; run s1-leftovers")
+        group = groups[0]
+        tags = {tag["Key"]: tag["Value"] for tag in group.get("Tags", [])}
+        if (
+            group.get("GroupId") != group_id
+            or group.get("VpcId") != vpc_id
+            or group.get("OwnerId") != ACCOUNT
+            or tags.get("aws:eks:cluster-name") != CLUSTER
+        ):
+            raise RuntimeError(
+                "Refusing cluster group without exact ownership/VPC; run s1-leftovers"
+            )
+        observed = True
+        enis = aws_json(
+            "ec2", "describe-network-interfaces", "--filters", f"Name=group-id,Values={group_id}"
+        )["NetworkInterfaces"]
+        if enis:
+            last_failure = "attached ENIs remain"
+            continue
+        try:
+            response = aws_json("ec2", "delete-security-group", "--group-id", group_id)
+        except subprocess.CalledProcessError as exc:
+            # Terraform's cross-group references or EC2 ENI removal may still be settling.
+            last_failure = str(exc)
+        else:
+            if not response.get("Return"):
+                raise RuntimeError(f"Deletion of {group_id} was not confirmed; run s1-leftovers")
+            # Require authoritative absence, even after a successful delete response.
+            if not aws_json(
+                "ec2", "describe-security-groups", "--filters", f"Name=group-id,Values={group_id}"
+            )["SecurityGroups"]:
+                return True
+            last_failure = "delete succeeded but group remains visible"
+    raise RuntimeError(
+        f"Cluster group {group_id} cleanup exhausted retries ({last_failure}); run s1-leftovers"
+    )
+
+
+def destroy_infrastructure(config):
+    args = ("destroy", "-input=false", "-auto-approve", f"-var-file={STATE / 'inputs.tfvars.json'}")
+    try:
+        terraform(*args)
+    except subprocess.CalledProcessError:
+        # An orphan cluster group can block Terraform's final VPC deletion.
+        if not cleanup_cluster_security_group(config):
+            raise
+        terraform(*args)
+        cleanup_cluster_security_group(config)
+    else:
+        cleanup_cluster_security_group(config)
+
+
 def up():
     run_approved()
     state_guard()
@@ -312,6 +436,7 @@ def up():
     (STATE / "connection.json").write_text(json.dumps(config, indent=2))
     # A second inventory survives loss of Terraform outputs during partial teardown.
     (STATE / "resource-inventory.json").write_text(terraform("show", "-json", capture=True))
+    ensure_endpoint_available(config)
     eni = aws_json(
         "ec2",
         "describe-network-interfaces",
@@ -434,7 +559,7 @@ def down():
     state_guard()
     config = connection() if (STATE / "connection.json").exists() else None
     clusters = aws_json("eks", "list-clusters")["clusters"]
-    if config:
+    if config and config.get("host_instance_id"):
         try:
             ssm(
                 config["host_instance_id"],
@@ -508,11 +633,19 @@ def down():
                 "--fargate-profile-name",
                 profile,
             )
+        # Persist service-created resource identity even after a partial apply.
+        recorded = {
+            "cluster_name": CLUSTER,
+            "cluster_security_group_id": cluster["resourcesVpcConfig"]["clusterSecurityGroupId"],
+            "execution_vpc_id": cluster["resourcesVpcConfig"]["vpcId"],
+        }
+        if config and any(config.get(k, v) != v for k, v in recorded.items()):
+            raise RuntimeError("Live cluster differs from recorded S1 teardown identity")
+        config = {**(config or {}), **recorded}
+        (STATE / "connection.json").write_text(json.dumps(config, indent=2))
         aws("eks", "delete-cluster", "--name", CLUSTER)
         aws("eks", "wait", "cluster-deleted", "--name", CLUSTER)
-    terraform(
-        "destroy", "-input=false", "-auto-approve", f"-var-file={STATE / 'inputs.tfvars.json'}"
-    )
+    destroy_infrastructure(config)
     leftovers()
 
 
