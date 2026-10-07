@@ -1,0 +1,85 @@
+import logging
+from contextlib import asynccontextmanager
+from threading import Event, Thread
+
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException
+
+from agent_runtime.api import error_response, router
+from agent_runtime.auth import Auth
+from agent_runtime.backend import FakeBackend
+from agent_runtime.clock import Clock
+from agent_runtime.config import Settings
+from agent_runtime.db import Database
+from agent_runtime.executions import APIError
+from agent_runtime.failpoints import Failpoints
+from agent_runtime.mockworkday import MockWorkday
+from agent_runtime.reconciler import Reconciler
+from agent_runtime.seed import seed
+
+
+def create_app(*, db=None, mw=None, clock=None, backend=None, failpoints=None, reconcile=True):
+    owns_db = db is None
+    owns_mw = mw is None
+    if db is None:
+        settings = Settings.from_env()
+        db = Database(settings.database_url)
+        db.initialize()
+        seed(db, settings.mw_base_url)
+    mw = mw or MockWorkday()
+    clock = clock or Clock()
+    backend = backend or FakeBackend()
+    failpoints = failpoints or Failpoints()
+    reconciler = Reconciler(db, backend, failpoints)
+    stop = Event()
+
+    def loop():
+        while not stop.is_set():
+            try:
+                reconciler.reconcile_once(clock.now())
+            except Exception:
+                logging.getLogger(__name__).exception("Reconcile pass failed")
+            stop.wait(1)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        thread = Thread(target=loop, daemon=True) if reconcile else None
+        if thread:
+            thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if thread:
+                thread.join()
+            if owns_mw:
+                mw.client.close()
+            if owns_db:
+                db.engine.dispose()
+
+    app = FastAPI(title="Agent Runtime R1", lifespan=lifespan)
+    app.state.db, app.state.mw, app.state.clock = db, mw, clock
+    app.state.backend, app.state.failpoints = backend, failpoints
+    app.state.reconciler = reconciler
+    app.state.auth = Auth(db, mw, clock)
+    app.include_router(router)
+
+    @app.exception_handler(APIError)
+    def api_error(request, exc):
+        return error_response(request, exc.status, exc.code, exc.message)
+
+    @app.exception_handler(RequestValidationError)
+    def validation_error(request, exc):
+        return error_response(request, 422, "INVALID_REQUEST", "Request does not match the schema")
+
+    @app.exception_handler(SQLAlchemyError)
+    def database_error(request, exc):
+        return error_response(request, 503, "UNAVAILABLE", "Database unavailable")
+
+    @app.exception_handler(HTTPException)
+    def http_error(request, exc):
+        return error_response(request, exc.status_code, "HTTP_ERROR", str(exc.detail))
+
+    return app
