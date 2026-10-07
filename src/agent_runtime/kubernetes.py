@@ -123,9 +123,10 @@ class KubernetesBackend:
                 if (
                     data.get("kind") == "Status"
                     and data.get("reason") == "Conflict"
-                    and data.get("details", {}).get("kind") == "pods"
+                    and data.get("details", {}).get("kind") in {"Pod", "pods"}
                     and data.get("details", {}).get("name") == name
-                    and "Precondition failed: UID in precondition:" in data.get("message", "")
+                    and f"the UID in the precondition ({uid}) does not match the UID in record ("
+                    in data.get("message", "")
                 ):
                     return
             raise ValueError("Cannot delete Pod")

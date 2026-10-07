@@ -196,8 +196,8 @@ def test_LC_11_delete_uid_precondition(settings, spec, status):
             json={
                 "kind": "Status",
                 "reason": "Conflict",
-                "details": {"kind": "pods", "name": f"exec-{spec.execution_id}"},
-                "message": "Precondition failed: UID in precondition: observed, UID in object meta: replacement",
+                "details": {"kind": "Pod", "name": f"exec-{spec.execution_id}"},
+                "message": "the UID in the precondition (observed) does not match the UID in record (replacement). The object might have been deleted and then recreated",
             },
         )
 
