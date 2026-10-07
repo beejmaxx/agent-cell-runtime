@@ -7,6 +7,7 @@ resource "aws_route53_resolver_firewall_domain_list" "allow" {
     "sts.us-east-2.amazonaws.com",
     "s3.us-east-2.amazonaws.com",
     "s3-us-east-2.amazonaws.com",
+    "s3-r-w.us-east-2.amazonaws.com",
     "prod-us-east-2-starport-layer-bucket.s3.us-east-2.amazonaws.com",
     "prod-us-east-2-starport-layer-bucket.s3.amazonaws.com",
     trimsuffix(trimprefix(aws_eks_cluster.execution.endpoint, "https://"), "/"),

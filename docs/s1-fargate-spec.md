@@ -355,3 +355,8 @@ cluster group ID even when it lacks experiment tags.
   replacing the trusted host during unrelated experiment adjustments.
 - DNS Firewall returns lowercase, trailing-dot domain names. Normalize the
   configured names to that representation to avoid repeated no-op updates.
+
+- E1 image-pull finding at 20:55:46 UTC: the allowlisted regional ECR layer
+  bucket returned CNAME `s3-r-w.us-east-2.amazonaws.com`; DNS query evidence
+  recorded `BLOCK/NXDOMAIN`. Add that exact observed name under the approved
+  chain-inspection adjustment rule. No wildcard or STS-policy change.
