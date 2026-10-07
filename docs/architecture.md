@@ -123,6 +123,20 @@ Metrics cover latency, saturation, failures, queue depth, startup, and cleanup. 
 
 Open decision: how to couple consequential effects with durable audit intent and eventual outcome. Sending an event to a queue after a successful operation leaves a crash window unless the design accounts for it.
 
+## Infrastructure principles
+
+**Terraform creates the platform; the runtime creates executions.**
+
+- Terraform owns long-lived platform resources:
+  - VPC, EKS, IAM, KMS, S3, SQS, ECR, and security groups;
+  - a database, if needed;
+  - observability plumbing.
+- Individual Cells, Pods, and executions are created dynamically by the controller, never by Terraform.
+- Environments are disposable. `terraform destroy` is a normal workflow between study sessions, because EKS, NAT gateways, and load balancers bill while idle.
+- No manual console steps. Every resource is tagged with project and environment.
+- A leftover check after destroy catches resources Kubernetes or AWS created implicitly, such as load balancers, EBS volumes, and Elastic IPs.
+- The protected enterprise system lives in [beejmaxx/mock-workday](https://github.com/beejmaxx/mock-workday) and is reached only through its published API.
+
 ## Deferred extensions
 
 - AWS workload identity, S3/KMS access, and cross-account role assumption.
