@@ -141,14 +141,22 @@ def test_ISO_1_operator_kubectl_ignores_proxy(monkeypatch, tmp_path):
     assert "HTTPS_PROXY" not in seen[0]["env"]
 
 
-def test_ISO_1_inventory_denial_cannot_report_clean(monkeypatch, tmp_path):
+@pytest.mark.parametrize("accepted", [False, True])
+def test_ISO_1_inventory_denial_cannot_report_clean(monkeypatch, tmp_path, accepted):
     import subprocess
 
     monkeypatch.setattr(s1, "STATE", tmp_path)
     (tmp_path / "connection.json").write_text(
         json.dumps({"cluster_oidc_issuer": "https://oidc.eks.us-east-2.amazonaws.com/id/SYNTHETIC"})
     )
-    monkeypatch.setattr(s1, "oidc_evidence", lambda issuer: {"outcome": "unverified"})
+    check = {"outcome": "unverified"}
+    if accepted:
+        check["stderr"] = (
+            "(AccessDenied) explicit deny in a service control policy: "
+            "arn:aws:organizations::482314592941:policy/o-aq8i87xn93/"
+            "service_control_policy/p-5fs30qru"
+        )
+    monkeypatch.setattr(s1, "oidc_evidence", lambda issuer: check)
     calls = []
     keys = {
         "get-resources": "ResourceTagMappingList",
@@ -191,17 +199,14 @@ def test_ISO_1_inventory_denial_cannot_report_clean(monkeypatch, tmp_path):
         return {keys[args[1]]: []}
 
     monkeypatch.setattr(s1, "aws_json", aws)
-    with pytest.raises(RuntimeError, match="incomplete checks"):
+    if accepted:
         s1.leftovers()
+        assert json.loads((tmp_path / "oidc-evidence.json").read_text()) == check
+    else:
+        with pytest.raises(RuntimeError, match="incomplete checks"):
+            s1.leftovers()
     evidence = json.loads((tmp_path / "leftovers.json").read_text())
-    assert evidence == [
-        {
-            "kind": "inventory-error",
-            "value": {
-                "outcome": "unverified",
-            },
-        }
-    ]
+    assert evidence == ([] if accepted else [{"kind": "inventory-error", "value": check}])
     assert calls[-1][:2] == ("ecr", "describe-repositories")
 
 
@@ -235,3 +240,34 @@ def test_ISO_1_exact_issuer_oidc_evidence(monkeypatch, code, error, outcome):
     )
     assert "get-open-id-connect-provider" in calls[0]
     assert "list-open-id-connect-providers" not in calls[0]
+
+
+def test_ISO_1_tag_index_requires_authoritative_absence(monkeypatch, tmp_path):
+    monkeypatch.setattr(s1, "STATE", tmp_path)
+    prefix = f"arn:aws:ec2:{s1.REGION}:{s1.ACCOUNT}:"
+    entries = [
+        {"ResourceARN": prefix + suffix}
+        for suffix in (
+            "security-group/sg-gone",
+            "security-group/sg-live",
+            "instance/i-terminated",
+            "unknown/keep",
+        )
+    ]
+
+    def describe(*args):
+        if args[1] == "describe-instances":
+            return {"Reservations": [{"Instances": [{"State": {"Name": "terminated"}}]}]}
+        return {"SecurityGroups": [{}] if args[-1].endswith("sg-live") else []}
+
+    monkeypatch.setattr(s1, "aws_json", describe)
+    assert s1.live_tagged_resources(entries) == [entries[1], entries[3]]
+    assert json.loads((tmp_path / "retired-tagged-resources.json").read_text()) == [
+        entries[0],
+        entries[2],
+    ]
+    monkeypatch.setattr(
+        s1, "aws_json", lambda *a: (_ for _ in ()).throw(RuntimeError("ExpiredToken"))
+    )
+    with pytest.raises(RuntimeError, match="ExpiredToken"):
+        s1.live_tagged_resources(entries)

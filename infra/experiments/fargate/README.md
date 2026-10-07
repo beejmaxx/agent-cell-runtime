@@ -103,7 +103,9 @@ logs, deletes and verifies execution Pods while API access remains, then deletes
 and waits for the Fargate profile and cluster before destroying the remaining
 S1 state. It refuses unmarked namespaces/clusters or unexpected profiles.
 `make s1-leftovers` checks tags, known names and recorded IDs, including ENIs,
-service roles and endpoint connections. Exported local evidence is intentional.
+service roles and endpoint connections. Stale EC2 tagging-index entries are
+checked by exact resource ID; confirmed deleted or terminated entries are saved
+in `retired-tagged-resources.json`. Exported local evidence is intentional.
 
 ## Review limitations
 
@@ -114,8 +116,11 @@ service roles and endpoint connections. Exported local evidence is intentional.
   The approved alternative queries `GetOpenIDConnectProvider` for the exact ARN
   derived from the recorded cluster issuer. Only `NoSuchEntity` proves absence;
   authorization failures remain incomplete. The exact lookup was also explicitly
-  SCP-denied during the first attempt, so E9 remains unverified. Evidence is
-  retained locally.
+  SCP-denied during the first attempt, so E9 remains unverified. The reviewer
+  accepts this specific SCP denial as an explicit inventory exception; all
+  other incomplete checks still fail. Mitigation evidence is the plan without
+  an OIDC provider, API access mode, and E7 showing no web-identity token in
+  Pods. These do not prove provider absence. Evidence is retained locally.
 - The current Free plan is active with $200 remaining credits. Planning does
   not verify that every create action/quota will succeed. The spec's running
   estimate is roughly $0.20–0.25/hour plus usage; it is not a spending cap.

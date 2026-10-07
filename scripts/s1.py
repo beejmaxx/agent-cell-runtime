@@ -512,6 +512,46 @@ def oidc_evidence(issuer):
     }
 
 
+def live_tagged_resources(values):
+    """The tagging index can retain deleted EC2 resources; verify their IDs."""
+    lookups = {
+        "security-group-rule": (
+            "describe-security-group-rules",
+            "security-group-rule-id",
+            "SecurityGroupRules",
+        ),
+        "security-group": ("describe-security-groups", "group-id", "SecurityGroups"),
+        "vpc-endpoint-service": (
+            "describe-vpc-endpoint-service-configurations",
+            "service-id",
+            "ServiceConfigurations",
+        ),
+        "vpc-endpoint": ("describe-vpc-endpoints", "vpc-endpoint-id", "VpcEndpoints"),
+        "instance": ("describe-instances", "instance-id", "Reservations"),
+        "volume": ("describe-volumes", "volume-id", "Volumes"),
+    }
+    live, retired = [], []
+    for value in values:
+        arn = value["ResourceARN"]
+        prefix = f"arn:aws:ec2:{REGION}:{ACCOUNT}:"
+        kind, _, resource_id = arn.removeprefix(prefix).partition("/")
+        if not arn.startswith(prefix) or kind not in lookups:
+            live.append(value)
+            continue
+        operation, field, key = lookups[kind]
+        records = aws_json("ec2", operation, "--filters", f"Name={field},Values={resource_id}")[key]
+        if kind == "instance":
+            records = [
+                i for r in records for i in r["Instances"] if i["State"]["Name"] != "terminated"
+            ]
+        elif kind == "vpc-endpoint":
+            records = [r for r in records if r["State"] != "deleted"]
+        (live if records else retired).append(value)
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "retired-tagged-resources.json").write_text(json.dumps(retired, indent=2))
+    return live
+
+
 def leftovers():
     caller = aws_json("sts", "get-caller-identity")
     if caller["Account"] != ACCOUNT:
@@ -525,9 +565,11 @@ def leftovers():
     tags = [{"Key": "lab", "Values": ["agent-runtime"]}, {"Key": "experiment", "Values": ["s1"]}]
     add(
         "tagged-resource",
-        aws_json("resourcegroupstaggingapi", "get-resources", "--tag-filters", json.dumps(tags))[
-            "ResourceTagMappingList"
-        ],
+        live_tagged_resources(
+            aws_json(
+                "resourcegroupstaggingapi", "get-resources", "--tag-filters", json.dumps(tags)
+            )["ResourceTagMappingList"]
+        ),
     )
     filters = "Name=tag:experiment,Values=s1"
     for operation, key in (
@@ -686,6 +728,16 @@ def leftovers():
         (STATE / "oidc-evidence.json").write_text(json.dumps(check, indent=2))
         if check["outcome"] == "present":
             add("oidc-provider", [check])
+        elif (
+            check["outcome"] == "unverified"
+            and "(AccessDenied)" in check.get("stderr", "")
+            and "explicit deny in a service control policy" in check["stderr"]
+            and "/service_control_policy/p-5fs30qru" in check["stderr"]
+        ):
+            # Reviewer accepts this visibility gap, not proof of provider absence.
+            print(
+                "OIDC absence UNVERIFIED: accepted SCP p-5fs30qru exception; see oidc-evidence.json"
+            )
         elif check["outcome"] != "absent":
             add("inventory-error", [check])
     add(

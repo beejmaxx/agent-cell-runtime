@@ -304,3 +304,16 @@ operator-role principal. Keep the existing operator identity and four authority
 roles; do not add a pathless operator role. This is an approved configuration
 correction, not evidence of a successful live connection. The first attempt's
 OIDC visibility and cleanup findings remain outstanding.
+
+
+### Retry and OIDC visibility decision (2026-10-08)
+
+The reviewer accepts E9 OIDC absence as **unverified** because SCP `p-5fs30qru`
+explicitly denies the exact-issuer lookup. Mitigation evidence is the Terraform
+plan containing no IAM OIDC provider, cluster API access mode, and E7 checking
+that execution Pods have no web-identity token. These observations do not prove
+provider absence. `s1-leftovers` retains the exact lookup evidence and may report
+no resource leftovers with this explicit exception; other inventory errors,
+including expired credentials, remain failures. Finish prior cleanup before
+retrying, record credential expiry before apply, and reserve time for teardown.
+If credentials expire during the run, stop and notify the reviewer immediately.

@@ -470,3 +470,30 @@ This correction has not been applied to AWS. The old saved plan must be
 regenerated before a retry. Expired credentials still block final cleanup
 verification, and the exact-issuer OIDC lookup denial remains unresolved;
 neither a clean inventory nor a successful PrivateLink connection is claimed.
+
+### S1 partial-apply cleanup completed — 2026-10-07 20:19 UTC
+
+After the reviewer refreshed `agent-runtime`, `S1_RUN_APPROVED=1 make s1-down`
+found the execution VPC still present. Direct EC2 inspection found no ENIs,
+but EKS-created security group `sg-097473168467cf37f` remained, with ownership
+tags for `lab-exec-s1`. Deleting that unused group at **20:12:16 UTC** allowed
+Terraform to finish deleting `vpc-09ffaf540e50e3e9a` (one remaining resource).
+The isolated S1 Terraform state is empty. Foundation/bootstrap were untouched.
+
+The tagging index retained deleted resources. The inventory now checks supported
+EC2 entries by exact resource ID and records confirmed deleted/terminated entries
+separately; unknown resource types and failed lookups remain failures.
+`make s1-leftovers` finished successfully at **20:19 UTC**, with `[]` and the
+explicit reviewer-accepted OIDC exception. Exact-issuer lookup remains denied
+by SCP `p-5fs30qru`; provider absence is **unverified**, not a pass. The approved
+mitigations are the plan with no provider, API access mode, and E7's live Pod
+web-identity checks (the latter still awaits the retry).
+
+Validation: **185 non-Kubernetes tests passed, 22 deselected** in 37.04 s;
+**16 focused operation tests passed**. Ruff passed. The regenerated plan has
+**76 creates, zero changes/deletions**, the account-root allowed principal with
+acceptance required, STS `GetCallerIdentity` only, API access mode, and no IAM
+OIDC provider. Raw evidence: `.local/s1/retry-cleanup-down.log`, `retry-vpc.json`,
+`retry-security-groups.json`, `retry-enis.json`, `retry-delete-cluster-sg.log`,
+`retry-leftovers-verified.log`, `first-attempt-final/`, `retry-operations-tests.log`,
+`retry-unit.log`, `retry-plan.log`, and `retry-plan.json`.
