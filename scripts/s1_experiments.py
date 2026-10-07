@@ -180,7 +180,7 @@ def test_S1_E8_admitted_privileges(live, monkeypatch):
 
     trials = {
         "root": {"runAsUser": 0, "runAsNonRoot": False},
-        "privileged": {"privileged": True},
+        "privileged": {"privileged": True, "allowPrivilegeEscalation": True},
         "escalation": {"allowPrivilegeEscalation": True},
         "net_raw": {"capabilities": {"drop": ["ALL"], "add": ["NET_RAW"]}},
         "unconfined": {"seccompProfile": {"type": "Unconfined"}},

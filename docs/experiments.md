@@ -497,3 +497,363 @@ OIDC provider. Raw evidence: `.local/s1/retry-cleanup-down.log`, `retry-vpc.json
 `retry-security-groups.json`, `retry-enis.json`, `retry-delete-cluster-sg.log`,
 `retry-leftovers-verified.log`, `first-attempt-final/`, `retry-operations-tests.log`,
 `retry-unit.log`, `retry-plan.log`, and `retry-plan.json`.
+
+## 2026-10-08 — S1 checkpoint-4 retry with static operator credentials
+
+**Completed with findings. Teardown and standalone leftovers checks passed, with the accepted OIDC visibility exception.**
+All times below are UTC on 2026-10-07 (2026-10-08 in Shanghai). The operator is
+exactly `arn:aws:iam::729608197929:user/lab-operator-cli`, using the local
+`agent-runtime` profile in `us-east-2`. Credentials remain local. The earlier
+15-minute `aws login` credential expiration was a rotation, not the session
+end; the reviewer subsequently selected non-expiring static credentials.
+
+Environment: Terraform 1.16.4, AWS provider 6.67.0, EKS/Kubernetes 1.36,
+Ubuntu 24.04 trusted host, Python 3.12.3, AWS CLI 2.37.10, uv 0.12.5,
+SSM agent 3.3.4793.0. The Docker-only Colima `s1-builder` built linux/amd64;
+the local Kubernetes profile remained stopped. ECR image:
+`729608197929.dkr.ecr.us-east-2.amazonaws.com/agent-runtime/fake-agent@sha256:c92e4a506cb8457473bfe654b37c4233722ffdc2d8a25eacd4c582c62f0078c9`.
+Observed Fargate allocation: `0.25vCPU 0.5GB`.
+
+### Provisioning and recovery observations
+
+- Retry resource creation began about 20:23:40. The account-root endpoint
+  permission was accepted. At 20:26:51, `AcceptVpcEndpointConnections` returned
+  an `Unsuccessful` item (`Unavailable`, endpoint still provisioning) inside a
+  successful API response. Provider 6.67.0 ignored that list. Retrying acceptance
+  for **only** `vpce-03183c1b19676ba00` succeeded with `Unsuccessful: []`.
+  The service retained `acceptance_required=true` and only the account-root
+  allowed principal. Evidence: `.local/s1/retry-accept-cloudtrail.json`,
+  `retry-accept-response.json`, `retry-privatelink-principals.json`,
+  `retry-privatelink-connections.json`.
+- DNS Firewall association priority 100 was rejected as reserved,
+  `RSLVR-02017`; priority 101 succeeded (`c6fd41c`).
+- **Implementer error:** a follow-up apply proceeded despite an assertion
+  detecting changes beyond the intended DNS association. Its shell did not
+  use `set -e`; the commentary prematurely described the plan as one addition.
+  The actual plan replaced the trusted host/EIP association/NLB target
+  attachment and normalized two DNS lists, in addition to the association.
+  After a separate EIP is attached, EC2 reads the launch-time public-IP flag
+  as true, causing replacement drift. `c44a081` ignores subsequent drift only
+  in that launch flag and canonicalizes returned DNS names. The managed EIP
+  remains authoritative. Subsequent dependent commands use `set -e`, and a
+  later plan showed no changes. Evidence: `dns-priority-plan.json`,
+  `dns-priority-plan.log`, `dns-priority-up.log`, `retry-baseline-plan.log`.
+- At 20:55:46, image pulling failed because the allowed ECR layer bucket's
+  CNAME `s3-r-w.us-east-2.amazonaws.com` was inspected and blocked. Query-log
+  evidence showed BLOCK/NXDOMAIN. Added only that exact alias (`2051ad1`);
+  the next image pull took 2.322 s. STS remained GetCallerIdentity-only, and
+  no new endpoint or wildcard was introduced. Evidence:
+  `retry-startup-dns.json`, `retry-dns-alias-add.json`, and
+  `.local/s1/live-pods/exec-3a24a7d4-e0bc-48e0-911c-bbd8dadda6f0.json`.
+- Harness setup needed kubectl's rendered exec defaults (`env: null`,
+  `provideClusterInfo: false`) included in the exact guard (`89cdaf4`). Evidence
+  export also needed directories owned by ubuntu rather than root (`8e4b5b6`).
+
+### E1 lifecycle and fixture results
+
+The preflight passed after the DNS correction. The first suite produced
+**8 passed, 10 failed, 196 deselected in 678.85 s**. LC-7's runtime fail-closed
+assertions passed, but the harness could not restore the RoleBinding: the
+RBAC escalation check rejected granting the controller's Pod rules. The
+harness's own Pod operations were otherwise authorized by its EKS access
+policy; the denial must not be read as inability to create Pods. That left the
+binding absent and invalidated nine subsequent failures as lifecycle evidence.
+The reviewer accepted this denial as positive isolation evidence and assigned
+restoration to the operator, without adding bind/escalate to the harness.
+
+After operator restoration, a run excluding only LC-7's RBAC case produced
+**16 passed, 1 failed, 197 deselected in 727.28 s**. The remaining failure was
+LC-8. The reviewed operator fixtures then passed **2 tests, 16 deselected in
+83.17 s**: LC-7 RBAC restoration and ISO-1/ISO-5/ID-8. Thus **17 of 18 distinct
+E1 tests passed across these runs; E1's mandatory pass condition is not met**.
+ISO-7 remains a substrate observation. No assertion or timeout was relaxed.
+The latest ISO credential/template runs passed with the original 60-second
+wait, so no timing adjustment was justified or made.
+
+LC-7 restoration (`4224e53`) uses a fixed ConfigMap request and restores only
+the source-defined controller binding from the local operator. The approved
+ISO-1 read-only impersonation query (`464ce5c`) similarly runs on the operator;
+only its text report reaches the host. Existing permission assertions remain
+unchanged. Missing/malformed reports fail closed. No operator credential,
+cluster-scoped harness grant, bind, or escalate permission was introduced.
+
+**LC-8 observed timing:** execution `1fed8c88-e3d9-408f-a76f-bdec9a2f6d03`
+was created at 21:17:39.971654 with runtime deadline 21:18:09.971654; its Pod
+was created at 21:17:40, scheduled at 21:18:15, kubelet startTime 21:18:16,
+and container started at 21:18:19. It was still Running when the 60-second
+assertion wait ended. The reconciler was intentionally stopped. Kubernetes
+[defines activeDeadlineSeconds relative to Pod startTime](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/),
+so the 30-second kubelet timer was not due until approximately 21:18:46.
+This explains why the test's budget was insufficient for that startup, but
+**does not establish eventual DeadlineExceeded or a wall-clock bound from
+execution creation**. LC-8 remains failed; no local-cluster debugging resumed.
+Two captured scheduling-to-container-start samples were 4 s each; total
+Pod-creation-to-start was 39 s and 46 s. These are observations, not a latency
+or isolation guarantee.
+
+Reproduction commands: `S1_RUN_APPROVED=1 make s1-up`; trusted-host
+`K8S_PROFILE=eks uv run python -m scripts.k8s_preflight`, then
+`K8S_PROFILE=eks uv run pytest -m k8s -p scripts.s1_evidence --tb=short`;
+rerun selection `-k 'not (LC_7 and rbac)'`; reviewed selection
+`-k '(LC_7 and rbac) or ISO_1_ISO_5_ID_8'` with the local operator polling
+`restore_fixture_binding`. Exact drivers are retained in `.local/s1/`.
+
+Evidence: `.local/s1/e1-first-suite.tgz`, `e1-remainder.tgz`,
+`retry-reviewed-fixtures.log`, `retry-lc7-binding-denial.log`,
+`retry-lc8-evidence.log`, `retry-observed-startup-times.json`, and sanitized
+`live-pods/`. Local validation after the fixture changes:
+**198 passed, 22 deselected in 58.45 s** (unit suite, excluding Kubernetes and
+integration), in `retry-final-unit.log`; focused fixture/profile tests:
+**49 passed** in `retry-permissions-units.log`.
+
+### E9 configuration evidence collected before mutations
+
+`.local/s1/retry-e9.json` records API access mode, the exact endpoint-service
+principal/acceptance gate, controller access-policy associations empty, and
+harness `AmazonEKSAdminPolicy` scoped exactly to `agent-exec` and
+`agent-exec-psa-control`. The harness trust names only `lab-s1-controller`;
+the controller can assume only that harness role. The Fargate execution trust
+names only `eks-fargate-pods.amazonaws.com`, constrained by the account and
+`arn:aws:eks:us-east-2:729608197929:fargateprofile/lab-exec-s1/agent-exec/*`.
+Its policy permits GetAuthorizationToken on `*` (the API's required resource
+scope) and the three image-pull actions only on `agent-runtime/fake-agent`.
+These are four distinct authority identities: operator IAM user, controller
+instance role, Fargate execution role, and test-only harness role. No operator
+role was copied onto the host.
+
+The execution VPC has no attached internet gateway, no NAT gateway, and no
+default route; its routes are local plus the S3 gateway endpoint. The control
+namespace has no PSA labels (`retry-namespace-labels.json`). ENI evidence in
+`pod-enis/` maps each captured Pod's UID and IP to the EC2 interface by exact
+VPC/IP filters. The observed Fargate annotation supplies the security group,
+not an ENI ID; the mapping is not inferred from a nonexistent ENI annotation.
+Baseline samples had exactly `sg-0c66b5cc14c01d62d`, without the cluster group.
+
+The exact-issuer IAM lookup was explicitly SCP-denied again. **OIDC absence
+remains unverified**, as accepted by the reviewer. The plan contains no IAM
+OIDC provider, EKS uses API access mode, and the E7 application-visible checks
+supply mitigating evidence; none proves provider absence.
+
+### E2 startup observations
+
+Eight completions (five sequential, three concurrent) succeeded. All eight
+have database create/callback timestamps. Six have exact container-status
+`startedAt`; two concurrent Pods were deleted before that field was captured,
+so their Kubernetes `Started` event timestamps are reported as proxies, not
+silently treated as exact container-status observations. Scheduled timestamps
+come from Kubernetes events. Combining those explicitly labeled sources:
+
+| Group | Create → container start, p50 / max | Scheduled → start, p50 / max | Create → callback, p50 / max |
+|---|---|---|---|
+| Five sequential | 40.34 / 43.07 s | 3.23 / 3.80 s | 41.55 / 44.29 s |
+| Three concurrent | 38.26 / 39.31 s | 3.57 / 3.74 s | 39.33 / 40.74 s |
+| All eight | 39.04 / 43.07 s | 3.24 / 3.80 s | 40.20 / 44.29 s |
+
+These are one-session observations, not a benchmark. The runtime's RUNNING
+state was not substituted for Kubernetes/container start. Evidence:
+`.local/s1/retry-E2-summary.json`, `retry-E2-events.json`,
+`retry-E2-timing-analysis.json`; `summarize_timing.py` records the calculation
+and the source selected for every row. Sample recording window:
+21:29:56–21:34:22 UTC. All captured allocations were 0.25 vCPU / 0.5 GB.
+
+### E3, E4, E7, E8 and E10 baseline observations
+
+The explicit baseline driver
+`K8S_PROFILE=eks uv run pytest scripts/s1_experiments.py -s -p scripts.s1_evidence --tb=short`
+passed **5 tests in 775.98 s**. These test counts confirm the driver completed;
+the security conclusions below come from inspecting its observations.
+Evidence archive: `.local/s1/baseline-experiments.tgz`, extracted at
+`baseline-experiments/.local/s1/evidence/experiments/`; runner log:
+`retry-experiments.log`.
+
+- **E3:** the concurrent inspect executions reported kernel `6.1.186` and
+  distinct boot IDs `5c0743c0-d75a-40fb-b73a-0b443e37a644` and
+  `0c32bf51-ecd6-421d-8b9b-92b8000e0d49`. This supports separate kernels,
+  not a claim about resistance to kernel or hypervisor compromise.
+- **E4:** completion through PrivateLink succeeded; the five tested non-completion
+  routes returned 404. Port 8000, direct trusted-host private/public listeners,
+  the private closed-port control, peer execution listener, and public IP
+  listener timed out. The peer listener was confirmed live by a loopback HTTP
+  request in its own Pod. The trusted listener was serving successful callbacks.
+  The host reached `https://1.1.1.1` (301) and `https://example.com` (200), proving
+  the external controls live; the Mac's direct 1.1.1.1 request failed, so it was
+  not used as the positive control. The public-name probe in the execution
+  returned `gaierror` after 20 s: **DNS failure, not proof of a TCP network deny**.
+  Its default resolver points to absent CoreDNS; the direct VPC-resolver tests
+  are reported separately in E6. Evidence: `retry-host-controls.log`,
+  `retry-E4-baseline.json`, and the archive’s `E4-baseline-peer-control.json`.
+- **Required-path exposure:** the private Kubernetes API accepted TCP/TLS;
+  anonymous `/api` and the projected token both returned 401, while `/healthz`
+  returned 200. ECR API, ECR DKR and STS endpoint IPs accepted TCP on 443
+  without credentials. Those were TCP-connect probes, not authenticated AWS
+  API successes. The canary anonymous PutObject connected over verified TLS
+  and received 403. Its enforcing layer is tested by E5 below.
+- **E7:** UID/GID 65532, effective capabilities zero, read-only root, intended
+  token audience/subject/Pod binding, no default service-account token mount,
+  no AWS credential environment names, and no nonempty default credentials
+  file. IMDSv2 token, IMDS role listing, and container metadata probes timed
+  out; no credentials were obtained through the enumerated paths. The private
+  image started, providing the infrastructure-role positive control. This is
+  application-visible evidence; the node's infrastructure identity is trusted.
+- **E8:** root, escalation, NET_RAW and unconfined-seccomp trials were rejected
+  by restricted PodSecurity. The privileged trial was rejected by Kubernetes
+  validation because `privileged=true` conflicted with
+  `allowPrivilegeEscalation=false`; **that trial alone does not prove PSA or
+  Fargate rejected a valid privileged request**. Writable root plus requested
+  NET_BIND_SERVICE was admitted. Actual UID/GID stayed 65532, effective
+  capabilities stayed zero, and root write/read-back succeeded (`probe`).
+  All 18 repeated network targets and credential probes matched baseline;
+  this variant did not repeat the separate peer-listener target. These are
+  bounded P1 observations, not exhaustive maximum-privilege or P2 evidence.
+- **E10:** execution A's credential received 401 when completing B; B remained
+  RUNNING. A's own completion succeeded through PrivateLink. The destination
+  therefore enforced per-execution authority in this attempt.
+
+E8 admission correction: the trial now sets both `privileged=true` and
+`allowPrivilegeEscalation=true`, avoiding the inconsistent-manifest rejection.
+A separate operator `kubectl create --dry-run=server` of that valid trial was
+rejected explicitly by `restricted:v1.36` for privileged execution and
+escalation. No Pod was created. This closes the privileged-admission evidence
+gap above; it does not attribute the rejection to Fargate itself. Exact driver
+and output: `.local/s1/valid_privileged_control.py` and
+`retry-E8-valid-privileged.json`.
+
+### E5 security-group mutation
+
+The operator deleted only `agent-exec/execution` SecurityGroupPolicy, then
+recreated both the peer listener and probe Pod. Both ENIs had exactly the
+cluster group `sg-07e005ac3dc0cbcf4`, verified in `retry-mutation-enis.log` and
+`pod-enis/`. The probe's stdout was collected instead of relying on a callback.
+The mutation test passed **1 test in 163.69 s**; results were recorded at
+21:46:58.306101. The original policy was restored in the runner's `finally`.
+
+Compared with E4, peer HTTP changed **timeout → 200**, while all five tested
+PrivateLink routes changed **404 → timeout**. The former demonstrates a
+measurable peer-isolation effect of the Pod group; the latter demonstrates
+the callback endpoint's ingress requirement for that group. The other probes
+had the same outcomes, including canary 403 and no metadata credentials.
+Those unchanged outcomes do not independently prove a security-group effect.
+Routing remains structurally checked with no IGW, NAT, or default route; no
+internet-capable routing mutation was introduced.
+
+Exact operator/host drivers: `.local/s1/run_mutations.py E5-no-SGP` and
+`mutation_sg.py`; evidence: `retry-E5-no-SGP.log`, `retry-E5-result.json`,
+`E5-original-SGP.json`, `E5-no-SGP.tgz`. The host driver confirms the peer's
+loopback listener before probing across Pods, and cancels both executions
+after collecting stdout. No Pod credential is included in the result logs.
+
+### E5 S3 endpoint-policy mutation
+
+Changing only the S3 gateway endpoint policy to full access changed the
+anonymous canary PutObject from **403 to 200** over verified TLS. The test
+passed **1 test in 56.68 s**, with result recorded at 21:49:44.854125. The
+bucket's SourceVpce restriction remained intact. The original image-layer-only
+endpoint policy was restored immediately in `finally`. This positive control
+identifies the endpoint policy as the baseline write-denial layer.
+Evidence: `.local/s1/retry-E5-s3-result.json`, `retry-E5-s3-full.log`,
+`E5-original-s3-policy.json`, `E5-s3-full.tgz`; driver:
+`PYTHONPATH=. uv run python .local/s1/run_mutations.py E5-s3-full`.
+
+### E6 DNS Firewall mutation
+
+Baseline direct UDP queries to `10.30.0.2` resolved the allowlisted ECR name.
+Fresh `s1-e891f01bcf0d4ca9a3b46fa4c33898f2.example.com` returned NXDOMAIN;
+the 21:40:01 query log explicitly records `firewall_rule_action: BLOCK`.
+After detaching the association, a newly generated name,
+`s1-bef607bcec3d406785b9ab6d3b5e1781.example.com`, returned NOERROR with zero
+A answers and an authority SOA. The 21:53:26 query log records NOERROR with
+no firewall-action fields. The allowlisted ECR name still resolved. This
+supports the stated resolver-filtering boundary and its bypass under removal;
+there is no attacker-controlled authoritative-server observation, so no claim
+of authoritative-side non-receipt is made.
+
+The detached test passed **1 test in 58.54 s**. The runner restored the same
+rule group at priority 101 with mutation protection disabled and S1 tags,
+waited for COMPLETE, removed only the obsolete S1 association state address,
+and imported replacement `rslvr-frgassoc-fb7b46580a34466d` into that address.
+No other state was modified. Evidence: `.local/s1/retry-E6-baseline-query.json`,
+`retry-E6-detached-query.json`, `retry-E6-result.json`, `retry-E6-detached.log`,
+`E6-original-association.json`, `E6-restored-association.json`. Exact driver:
+`PYTHONPATH=. uv run python .local/s1/run_dns_mutation.py`.
+
+### Restoration verification and decision
+
+The compact post-mutation baseline passed **1 test in 55.94 s**: canary writes
+returned 403 again, the fresh non-allowlisted direct DNS query returned
+NXDOMAIN, and the allowlisted ECR name resolved. The functional check and
+original probe configuration were exported before teardown. The final
+`S1_STS_GET_CALLER_IDENTITY_ONLY=true make s1-plan` reported **no changes**;
+fmt and validate passed. `retry-restored-configuration.json` records the
+restored Pod policy, DNS association COMPLETE/priority 101, fail-open disabled,
+and ALLOW/BLOCK rules. E9's repeated inventory retained the namespace-only
+harness policy, exact PrivateLink acceptance gate, and unchanged STS restriction.
+No observed startup requirement justified widening STS. This is not evidence
+that the endpoint was unused.
+
+Evidence: `.local/s1/retry-restored-baseline.log`,
+`retry-restored-baseline.json`, `retry-restored-query.json`,
+`retry-final-plan.log`, `retry-restored-configuration.json`,
+`retry-e9-baseline.json`, and `retry-e9.json` (post-mutation).
+
+**Decision for review:** E1 did not meet its mandatory condition because LC-8
+failed. E2 is observational, with two explicitly labeled event-time proxies.
+E3 and E10 passed their checks. E4–E8 produced the bounded network/identity,
+mutation, and admission evidence described above. E9 verified the accessible
+configuration checks but cannot prove OIDC-provider absence under the SCP.
+S1 therefore does not receive an unconditional adoption recommendation from
+this run. No lifecycle assertion was loosened to obtain a pass, and no claim
+extends to P2, P3, or control-plane compromise.
+
+
+The restored fresh query `s1-1ee9c8e7f16a49c4b113f53c5fc83f12.example.com`
+was explicitly logged BLOCK after reattachment (`retry-restored-query.json`).
+The final read-only plan and repeated inventory found no mutation left active.
+Provisioning commands and outputs are retained in `.local/s1/retry-plan.log`,
+`retry-plan.json`, `retry-up.log`, and `dns-priority-up.log`. Image publication
+used the dedicated S1 ECR repository; `image.json` records the digest and
+architecture. The Mock Workday repository and all foundation/bootstrap states
+were outside this run's mutation scope.
+
+Result timestamps in the final archive (UTC): E3/E7 inspect 21:35:27;
+E10 21:37:27; E4 21:40:02; E8 admission/inspect/probes
+21:40:33 / 21:41:14 / 21:42:38; restored baseline 21:57:56.
+`.local/s1/retry-evidence-sha256.json` hashes 13 retained evidence artifacts.
+`retry-canary-policy.json` independently verifies that the SourceVpce bucket
+condition remained in place for the S3 mutation.
+
+### Teardown
+
+`S1_RUN_APPROVED=1 make s1-down` started at **22:00:00 UTC**. Evidence export
+completed before deletion. The Fargate profile was deleted before the cluster;
+Terraform then destroyed **69 remaining resources**, including the execution
+VPC and dedicated S1 ECR repository. The destroy completed by 22:11:26.
+
+The EKS-created cluster security group survived cluster deletion again.
+At 22:08:31.989184, the operator verified group `sg-07e005ac3dc0cbcf4` belonged
+to `lab-exec-s1` in `vpc-0a7cf985b8f044cf6` and had **zero attached ENIs**.
+After Terraform removed its cross-group rules, explicit deletion succeeded.
+This manual, ownership-checked cleanup remains a teardown finding; the group
+was not silently ignored. Raw evidence: `.local/s1/retry-orphan-cluster-group.json`,
+`retry-orphan-delete.log`, `delete_orphan_cluster_group.py`, and
+`retry-final-down.log`.
+
+The Docker-only `s1-builder` stopped at 22:01:00; local Kubernetes was never
+started for this checkpoint (`retry-builder-stop.log`). Retry resource lifetime
+was approximately **1 hour 48 minutes**, from first creation around 20:23:40 to
+completed destruction around 22:11, below the three-hour target. Actual billing
+was not measured; the spec's hourly figures remain estimates.
+
+`s1-down` exited **0** at 22:14 with inventory **`[]`**. The S1 state list was
+empty (`retry-final-state-list.txt`). The inventory explicitly reported the
+reviewer-accepted SCP/OIDC exception; this is not an OIDC absence proof.
+Prior partial-apply cleanup had likewise removed the old orphan cluster group
+`sg-097473168467cf37f` and VPC `vpc-09ffaf540e50e3e9a` before the retry;
+those resources were not carried into this run.
+
+The standalone **`make s1-leftovers` exited 0 with `[]` at 22:17:46 UTC**,
+again retaining only the explicit OIDC visibility exception. It checked the
+recorded cluster security group and ENIs as well as tagged resources. Evidence:
+`.local/s1/retry-final-leftovers.log`, `leftovers.json`,
+`retired-tagged-resources.json`, and `oidc-evidence.json`. No S1 resource
+leftovers were reported. The state bucket and foundation/bootstrap resources
+were not destroyed. Checkpoint 4 stops here for review; no push was performed.
