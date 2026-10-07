@@ -335,3 +335,16 @@ after cluster deletion. If it remains, confirm the group’s S1 cluster ownershi
 execution VPC, and absence of attached ENIs before deleting it; Terraform’s
 execution VPC deletion must then complete. `s1-leftovers` checks the recorded
 cluster group ID even when it lacks experiment tags.
+
+
+### Provisioning corrections observed during retry (2026-10-08)
+
+- Route 53 Resolver rejected VPC firewall association priority `100` as
+  reserved (`RSLVR-02017`). Use `101`, within the documented exclusive range
+  above 100 and below 9900. This is the only rule-group association, so its
+  relative ordering and the ALLOW/BLOCK rules are unchanged.
+- Terraform AWS provider 6.67.0 ignored the `Unsuccessful` item returned by
+  `AcceptVpcEndpointConnections` when the endpoint was still provisioning.
+  After confirming CloudTrail’s `Unavailable` response, retrying acceptance
+  for only the Terraform-created endpoint succeeded. This retains the approved
+  account principal and exact-endpoint acceptance gate.

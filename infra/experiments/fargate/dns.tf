@@ -44,7 +44,7 @@ resource "aws_route53_resolver_firewall_rule_group_association" "execution" {
   name                   = "lab-s1-execution"
   firewall_rule_group_id = aws_route53_resolver_firewall_rule_group.execution.id
   vpc_id                 = aws_vpc.execution.id
-  priority               = 100
+  priority               = 101
   mutation_protection    = "DISABLED"
   depends_on             = [aws_route53_resolver_firewall_rule.allow, aws_route53_resolver_firewall_rule.block]
 }
