@@ -31,8 +31,15 @@ Where possible, the hostile workload has nothing to steal and nowhere to go, rat
   - no `hostPath`;
   - read-only root filesystem;
   - writable scratch space only where required.
-- **No Kubernetes service-account credential:** `automountServiceAccountToken: false`, so there is no token to steal.
-- **No path to the cloud metadata endpoint** (`169.254.169.254`) and no AWS credentials in the workload. Blocked by construction, not detected after the fact.
+- **No default Kubernetes API credential:** `automountServiceAccountToken: false`.
+  - The execution may receive one explicitly projected, short-lived, Pod-bound token with audience `agent-cell-gateway`.
+  - That token only proves "I am execution E" to the gateway. It carries no Kubernetes RBAC permissions and no downstream authority. What E may do comes from the gateway's execution record (see trust boundaries).
+- **No AWS credentials in the workload, and no path to the node's credentials.** Four independent layers, so one mistake does not expose them:
+  1. Network policy denies the agent's egress to the metadata endpoint (`169.254.169.254`).
+  2. EC2 nodes require IMDSv2 with response hop limit 1, so ordinary Pods cannot obtain the node's instance-profile credentials even if the network rule is missing. The metadata endpoint itself stays enabled, because node components depend on it.
+  3. Untrusted execution Pods may not use `hostNetwork` (or other host namespaces). This is enforced by admission policy (Pod Security Admission `restricted` or equivalent), not by convention. The hop-limit defense depends on it.
+  4. The node IAM role is minimally privileged. For example, the VPC CNI's permissions move to its own workload identity, so stolen node credentials grant little.
+- **No agent DNS resolution beyond what its granted connectivity requires.** The cluster DNS resolver forwards lookups for external names, so allowing arbitrary DNS is an exfiltration channel (DNS tunneling). Kubernetes `NetworkPolicy` cannot filter by query name. Either the agent gets no DNS at all, or DNS-aware egress enforcement allows only required internal names.
 - **No direct network route** to Mock Workday, other executions, or internal services. The only egress is the enforcement boundary.
 - **No platform or tenant credentials** in environment variables, files, or images.
 
