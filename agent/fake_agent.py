@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from probes import CA_PATH, dns, metadata, probe, request, url_target
+from probes import CA_PATH, credential_paths, dns, metadata, probe, request, url_target
 
 
 def complete(result):
@@ -111,6 +111,7 @@ def main():
         result = {"probes": [probe(target) for target in data.get("targets", [])]}
         if data.get("metadata"):
             result["metadata"] = metadata()
+            result["credential_paths"] = credential_paths()
         if "dns" in data:
             result["dns"] = [dns(**query) for query in data["dns"]]
     elif behavior == "listen":

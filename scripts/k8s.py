@@ -17,7 +17,7 @@ if PROFILE not in {"colima", "eks"}:
     raise ValueError("K8S_PROFILE must be colima or eks")
 STATE = ROOT / (".local/s1" if PROFILE == "eks" else ".local/k8s")
 EKS_ARN = "arn:aws:eks:us-east-2:729608197929:cluster/lab-exec-s1"
-VERSION = "v1.35.0"
+VERSION = "v1.36.0" if PROFILE == "eks" else "v1.35.0"
 NAMESPACES = ("agent-runtime", "agent-exec")
 MARKER = "lab.agent-runtime/owned"
 IMAGE = "agent-runtime/fake-agent:r2"
@@ -45,7 +45,8 @@ def kubectl_args(*args):
     binary = str(KUBECTL) if KUBECTL.exists() else shutil.which("kubectl")
     if not binary:
         raise RuntimeError("kubectl is needed to verify the existing Colima configuration")
-    return [binary, "--context", context(), *args]
+    config = ["--kubeconfig", str(STATE / "kubeconfig.json")] if PROFILE == "eks" else []
+    return [binary, *config, "--context", context(), *args]
 
 
 def kubectl(*args):
@@ -70,6 +71,10 @@ def guard():
             raise RuntimeError(
                 "EKS context does not match the recorded S1 cluster ARN, endpoint and CA"
             )
+        from scripts.s1_host import harness_exec
+
+        if config.get("users") != [{"name": "s1-harness", "user": {"exec": harness_exec()}}]:
+            raise RuntimeError("EKS admin context must assume only s1-harness")
         return cluster
     if urlparse(cluster["server"]).hostname not in {"127.0.0.1", "localhost"}:
         raise RuntimeError("Refusing a non-loopback Kubernetes API URL")
@@ -77,7 +82,7 @@ def guard():
 
 
 def require_owned(allow_missing=False):
-    for name in NAMESPACES:
+    for name in ("agent-exec", "agent-exec-psa-control") if PROFILE == "eks" else NAMESPACES:
         raw = kubectl("get", "namespace", name, "--ignore-not-found", "-o", "json")
         if not raw.strip() and allow_missing:
             continue
@@ -105,7 +110,10 @@ def tools():
 
 def token(cluster):
     if PROFILE == "eks":
-        raise RuntimeError("EKS controller tokens must be issued by the trusted-host role")
+        from scripts.s1_host import refresh_token
+
+        refresh_token(STATE)
+        return
     require_owned()
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(STATE, 0o700)
@@ -124,12 +132,12 @@ def token(cluster):
 
 def main():
     command = sys.argv[1]
-    if PROFILE == "eks" and command in {"up", "down", "token"}:
-        raise RuntimeError("EKS harness administration awaits the S1 operator-path decision")
-    cluster = guard()
     if command == "tools":
         tools()
         return
+    if PROFILE == "eks" and command in {"up", "down"}:
+        raise RuntimeError("EKS cluster setup and teardown belong to the S1 operator targets")
+    cluster = guard()
     if not KUBECTL.exists():
         raise RuntimeError("Run make k8s-tools first")
     if command == "up":

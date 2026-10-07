@@ -226,3 +226,25 @@ pending the regression gate. There is no new spec ambiguity.
 Cleanup verified an empty `agent-exec` namespace. The four temporary
 worktrees were removed after exporting their sanitized evidence; the current
 agent image was restored. No AWS resources were created or changed.
+
+## 2026-10-08 — S1 checkpoint 2 code complete; EKS validation deferred to E1
+
+The reviewer accepted the local Kubernetes failures as environmental and
+instructed that Colima remain stopped. LC-8 and the other Kubernetes tests will
+run on EKS in E1; a failure there remains a finding, not an assertion to relax.
+
+Implemented the test-only `s1-harness` trust and EKS policy association, scoped
+exactly to `agent-exec` and `agent-exec-psa-control`. The EKS harness uses that
+role only for admin kubectl calls and separately refreshes controller tokens.
+Operator setup pre-creates the unlabeled PSA control namespace and its service
+account. ISO-5 never creates/deletes that namespace on EKS; LC-7 restores only
+its namespaced RoleBinding. Added credential-path probes that retain no secret
+values, profile guards, and unit coverage of the approved boundaries. The spec
+and implementation record the same test-only rationale.
+
+Validation: `make test` **169 passed, 22 deselected** (18 Kubernetes and four
+HTTP integration tests), one dependency deprecation warning. Ruff check,
+formatting and `git diff --check` passed. Mock Workday was unavailable, so its
+four integration tests retain the earlier passing evidence, not a fresh run.
+Colima was not started. Live EKS role assumption, namespace authorization and
+Fargate lifecycle behavior remain unverified until E1. No AWS resources changed.

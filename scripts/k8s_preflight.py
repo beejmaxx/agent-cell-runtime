@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
-from k8s import IMAGE, ROOT, guard, kubectl, require_owned
+from k8s import PROFILE, STATE, guard, image, kubectl, require_owned
 
 from agent_runtime.pod import pod_manifest
 
@@ -21,7 +21,7 @@ def run():
     version = json.loads(kubectl("version", "--client", "-o", "json"))["clientVersion"][
         "gitVersion"
     ]
-    assert version.startswith("v1.35."), version
+    assert version.startswith("v1.36." if PROFILE == "eks" else "v1.35."), version
     for resource, namespace, name in (
         ("serviceaccount", "agent-runtime", "agent-runtime-controller"),
         ("serviceaccount", "agent-exec", "agent-exec"),
@@ -29,13 +29,17 @@ def run():
         ("rolebinding", "agent-exec", "workload-controller"),
         ("resourcequota", "agent-exec", "executions"),
     ):
+        if PROFILE == "eks" and namespace == "agent-runtime":
+            continue
         kubectl("get", resource, name, "-n", namespace, "-o", "name")
-    subprocess.run(
-        ["docker", "--context", "colima", "image", "inspect", IMAGE],
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )
-    evidence = ROOT / ".local/k8s/preflight"
+    agent_image = image()
+    if PROFILE != "eks":
+        subprocess.run(
+            ["docker", "--context", "colima", "image", "inspect", agent_image],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+    evidence = STATE / "preflight"
     evidence.mkdir(parents=True, exist_ok=True)
     results, credentials = {}, {}
 
@@ -56,10 +60,12 @@ def run():
         def log_message(self, *args):
             pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Receiver)
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", 8001) if PROFILE == "eks" else ("127.0.0.1", 0), Receiver
+    )
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    state = ROOT / ".local/k8s"
+    state = STATE
     client = httpx.Client(
         base_url=cluster["server"],
         trust_env=False,
@@ -69,8 +75,11 @@ def run():
     )
     settings = SimpleNamespace(
         k8s_namespace="agent-exec",
-        agent_image=IMAGE,
-        runtime_url=f"http://192.168.5.2:{server.server_port}",
+        agent_image=agent_image,
+        k8s_profile=PROFILE,
+        runtime_url=json.loads((STATE / "host.json").read_text())["completion_url"]
+        if PROFILE == "eks"
+        else f"http://192.168.5.2:{server.server_port}",
     )
     pods = []
     path = "/api/v1/namespaces/agent-exec/pods"
@@ -151,4 +160,10 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    if PROFILE == "eks":
+        from scripts.s1_host import controller_tokens
+
+        with controller_tokens(STATE):
+            run()
+    else:
+        run()

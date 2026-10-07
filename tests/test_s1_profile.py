@@ -8,6 +8,7 @@ from test_kubernetes_backend import spec as spec_fixture
 from agent_runtime.config import Settings
 from agent_runtime.pod import pod_manifest
 from scripts import k8s
+from scripts.s1_host import harness_exec
 from scripts.s1_image import digest_image
 
 spec = spec_fixture
@@ -43,7 +44,10 @@ def test_ISO_1_eks_guard_checks_cluster_identity(monkeypatch, tmp_path, bad):
     }
     (tmp_path / "cluster.json").write_text(json.dumps(expected))
     cluster = {"server": expected["endpoint"], "certificate-authority-data": "synthetic-ca"}
-    config = {"clusters": [{"name": k8s.EKS_ARN, "cluster": cluster}]}
+    config = {
+        "clusters": [{"name": k8s.EKS_ARN, "cluster": cluster}],
+        "users": [{"name": "s1-harness", "user": {"exec": harness_exec()}}],
+    }
     if bad == "arn":
         config["clusters"][0]["name"] = "another-cluster"
     elif bad == "endpoint":
@@ -175,3 +179,113 @@ def test_ISO_5_digest_required_for_eks():
             Settings("unused", k8s_profile="eks", agent_image=bad)
     with pytest.raises(ValueError):
         digest_image("latest")
+
+
+def test_ISO_1_harness_trust_and_namespace_scope():
+    from pathlib import Path
+
+    data = json.loads(Path("infra/experiments/fargate/harness.tf.json").read_text())["resource"]
+    role = data["aws_iam_role"]["harness"]
+    trust = json.loads(role["assume_role_policy"])["Statement"]
+    assert trust == [
+        {
+            "Effect": "Allow",
+            "Principal": {"AWS": "${aws_iam_role.controller.arn}"},
+            "Action": "sts:AssumeRole",
+        }
+    ]
+    policy = data["aws_eks_access_policy_association"]["harness"]
+    assert policy["policy_arn"].endswith("/AmazonEKSAdminPolicy")
+    assert policy["access_scope"] == {
+        "type": "namespace",
+        "namespaces": ["agent-exec", "agent-exec-psa-control"],
+    }
+    assume = json.loads(data["aws_iam_role_policy"]["assume_harness"]["policy"])["Statement"]
+    assert assume == [
+        {"Effect": "Allow", "Action": "sts:AssumeRole", "Resource": "${aws_iam_role.harness.arn}"}
+    ]
+
+
+@pytest.mark.parametrize("psa_label", [False, True])
+def test_ISO_5_eks_control_never_mutates_namespace(monkeypatch, psa_label):
+    import k8s_support as support
+
+    from scripts.s1_kubernetes import CONTROL_NAMESPACE, MARKER, manifests
+
+    monkeypatch.setattr(support, "PROFILE", "eks")
+    calls = []
+    labels = {MARKER: "true"}
+    if psa_label:
+        labels["pod-security.kubernetes.io/enforce"] = "restricted"
+
+    def kubectl(*args):
+        calls.append(args)
+        return json.dumps({"metadata": {"labels": labels}})
+
+    monkeypatch.setattr(support, "kubectl", kubectl)
+    if psa_label:
+        with pytest.raises(RuntimeError, match="unlabeled"), support.psa_control_namespace():
+            pytest.fail("Labeled namespace was accepted")
+    else:
+        with (
+            pytest.raises(ValueError, match="test failure"),
+            support.psa_control_namespace() as namespace,
+        ):
+            assert namespace == CONTROL_NAMESPACE
+            raise ValueError("test failure")
+    assert all(call[0] == "get" for call in calls)
+    setup = manifests("sg-synthetic")["items"]
+    control = next(
+        m for m in setup if m["kind"] == "Namespace" and m["metadata"]["name"] == CONTROL_NAMESPACE
+    )
+    assert not any(k.startswith("pod-security.") for k in control["metadata"]["labels"])
+    assert any(
+        m["kind"] == "ServiceAccount" and m["metadata"].get("namespace") == CONTROL_NAMESPACE
+        for m in setup
+    )
+
+
+def test_LC_7_restore_only_namespaced_rolebinding(monkeypatch):
+    import k8s_support as support
+
+    monkeypatch.setattr(support, "PROFILE", "eks")
+    calls = []
+    monkeypatch.setattr(support, "kubectl_args", lambda *args: ["kubectl", *args])
+    monkeypatch.setattr(
+        support.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    support.restore_controller_binding()
+    manifest = json.loads(calls[0][1]["input"])
+    assert manifest["kind"] == "RoleBinding"
+    assert manifest["metadata"]["namespace"] == "agent-exec"
+    assert manifest["subjects"][0]["name"] == "agent-runtime-controllers"
+
+
+@pytest.mark.parametrize("role", ["lab-s1-controller", "s1-harness", "AccountFullAccessRole"])
+def test_ISO_1_controller_tokens_never_assume_harness(monkeypatch, tmp_path, role):
+    from scripts import s1_host
+
+    calls = []
+
+    def aws(*args):
+        calls.append(args)
+        if args[0] == "sts":
+            return json.dumps(
+                {
+                    "Account": "729608197929",
+                    "Arn": f"arn:aws:sts::729608197929:assumed-role/{role}/synthetic",
+                }
+            )
+        return json.dumps({"status": {"token": "synthetic-token"}})
+
+    monkeypatch.setattr(s1_host, "aws", aws)
+    if role != "lab-s1-controller":
+        with pytest.raises(RuntimeError, match="trusted host"):
+            s1_host.refresh_token(tmp_path)
+        assert not (tmp_path / "controller.token").exists()
+    else:
+        s1_host.refresh_token(tmp_path)
+        assert (tmp_path / "controller.token").read_text() == "synthetic-token\n"
+        assert (tmp_path / "controller.token").stat().st_mode & 0o777 == 0o600
+        assert "--role-arn" not in calls[-1]
+    assert s1_host.HARNESS_ROLE in s1_host.harness_exec()["args"]

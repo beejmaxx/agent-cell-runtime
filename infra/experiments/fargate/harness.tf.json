@@ -1,0 +1,43 @@
+{
+  "resource": {
+    "aws_iam_role": {
+      "harness": {
+        "name": "s1-harness",
+        "description": "S1 test scaffolding only; absent from production",
+        "assume_role_policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Principal\": {\"AWS\": \"${aws_iam_role.controller.arn}\"}, \"Action\": \"sts:AssumeRole\"}]}",
+        "tags": {
+          "lab": "agent-runtime",
+          "experiment": "s1"
+        }
+      }
+    },
+    "aws_iam_role_policy": {
+      "assume_harness": {
+        "name": "s1-assume-harness",
+        "role": "${aws_iam_role.controller.name}",
+        "policy": "{\"Version\": \"2012-10-17\", \"Statement\": [{\"Effect\": \"Allow\", \"Action\": \"sts:AssumeRole\", \"Resource\": \"${aws_iam_role.harness.arn}\"}]}"
+      }
+    },
+    "aws_eks_access_entry": {
+      "harness": {
+        "cluster_name": "${aws_eks_cluster.execution.name}",
+        "principal_arn": "${aws_iam_role.harness.arn}",
+        "type": "STANDARD"
+      }
+    },
+    "aws_eks_access_policy_association": {
+      "harness": {
+        "cluster_name": "${aws_eks_cluster.execution.name}",
+        "principal_arn": "${aws_eks_access_entry.harness.principal_arn}",
+        "policy_arn": "arn:aws:eks::aws:cluster-access-policy/AmazonEKSAdminPolicy",
+        "access_scope": {
+          "type": "namespace",
+          "namespaces": [
+            "agent-exec",
+            "agent-exec-psa-control"
+          ]
+        }
+      }
+    }
+  }
+}

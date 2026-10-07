@@ -152,9 +152,24 @@ and credential values are never included in evidence. A DNS response, including
 NXDOMAIN, is not evidence of blocking: E6 still requires query logs and the
 firewall-removal control.
 
-Checkpoint 2 is still in progress. The EKS harness execution location and its
-operator-only administrative path require a spec clarification before they can
-be wired together. No S1 infrastructure has been provisioned or experiments run.
+The EKS harness runs on the trusted EC2 host. Its `agent-runtime` AWS profile
+uses the instance role (no copied operator credentials). Run
+`uv run python -m scripts.s1_host` there to create a private kubeconfig whose
+exec credential assumes `s1-harness`; `K8S_PROFILE=eks make test-k8s` keeps
+runtime requests on separately refreshed controller tokens. The full API binds
+loopback `:8000`; only the completion app binds `:8001`. The callback address
+comes from `.local/s1/host.json`, using the PrivateLink endpoint IP.
+
+Operator setup owns the namespaces, RBAC, quota and SecurityGroupPolicy.
+`s1-harness` has AmazonEKSAdminPolicy only in `agent-exec` and
+`agent-exec-psa-control`: LC-7 needs RoleBinding administration, and ISO-5 uses
+the pre-created unlabeled namespace for dry-run controls. This role is test
+scaffolding absent from production. The harness never creates/deletes EKS
+namespaces. Image metadata and connection files live under `.local/s1/`.
+
+The reviewer accepted the local Kubernetes timing failures as environmental;
+Colima stays stopped for this checkpoint. E1 on EKS supplies the live lifecycle
+evidence, including LC-8; no invariant or timeout was weakened.
 
 ## License
 

@@ -213,3 +213,59 @@ def url_target(name, url, method="GET", **extra):
         "path": parsed.path or "/",
         **extra,
     }
+
+
+def credential_paths(environment=None):
+    """Inspect application-visible credential sources without returning their contents."""
+    import os
+    from pathlib import Path
+
+    environment = os.environ if environment is None else environment
+    obtained = bool(
+        environment.get("AWS_ACCESS_KEY_ID") and environment.get("AWS_SECRET_ACCESS_KEY")
+    )
+    files = {}
+    for key in (
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    ):
+        path = environment.get(key)
+        if path:
+            try:
+                files[key] = bool(Path(path).read_bytes())
+            except OSError:
+                files[key] = False
+    default = Path(environment.get("HOME", "/nonexistent")) / ".aws/credentials"
+    try:
+        files["shared_credentials_default"] = bool(default.read_bytes())
+    except OSError:
+        files["shared_credentials_default"] = False
+    results = []
+    uri = environment.get("AWS_CONTAINER_CREDENTIALS_FULL_URI")
+    if not uri and environment.get("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"):
+        uri = "http://169.254.170.2" + environment["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"]
+    if uri:
+        headers = {}
+        token = environment.get("AWS_CONTAINER_AUTHORIZATION_TOKEN")
+        token_file = environment.get("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE")
+        if token_file:
+            try:
+                token = Path(token_file).read_text().strip()
+            except OSError:
+                token = None
+        if token:
+            headers["Authorization"] = token
+        try:
+            target = url_target("injected container credential URI", uri)
+            result, payload = request(target, headers=headers, read_body=True)
+            obtained |= has_credentials(payload)
+            results.append(result)
+        except ValueError:
+            results.append({"name": "injected container credential URI", "outcome": "probe error"})
+    return {
+        "credentials_obtained": obtained,
+        "credential_files_nonempty": files,
+        "aws_env_names": sorted(k for k in environment if k.startswith("AWS_")),
+        "probes": results,
+    }

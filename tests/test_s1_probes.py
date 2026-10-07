@@ -113,3 +113,28 @@ def test_ISO_3_dns_fresh_names_and_direct_resolver():
     assert first["name"] != second["name"]
     assert first["rcode"] == second["rcode"] == 3
     assert first["outcome"] == "DNS response"  # NXDOMAIN does not prove filtering.
+
+
+def test_ID_8_injected_credential_paths_never_export_secrets(endpoint, tmp_path):
+    port, seen = endpoint
+    token = tmp_path / "token"
+    token.write_text("sentinel-authorization")
+    result = probes.credential_paths(
+        {
+            "HOME": str(tmp_path),
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI": f"http://127.0.0.1:{port}/latest/meta-data/iam/security-credentials/synthetic-role",
+            "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE": str(token),
+            "AWS_WEB_IDENTITY_TOKEN_FILE": str(token),
+        }
+    )
+    assert result["credentials_obtained"]
+    assert result["credential_files_nonempty"]["AWS_WEB_IDENTITY_TOKEN_FILE"]
+    assert seen[-1][2]["Authorization"] == "sentinel-authorization"
+    for secret in (
+        "sentinel-authorization",
+        "sentinel-key",
+        "sentinel-secret",
+        "synthetic-role",
+        str(token),
+    ):
+        assert secret not in json.dumps(result)

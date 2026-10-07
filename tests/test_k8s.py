@@ -3,24 +3,38 @@ from uuid import uuid4
 
 import pytest
 from conftest import cancel, create, get, reconcile, row
-from k8s_support import admin_create, admin_pod, delete_pod, evidence, poll, restart, start, stop
+from k8s_support import (
+    admin_create,
+    admin_pod,
+    delete_pod,
+    evidence,
+    image_env_names,
+    poll,
+    psa_control_namespace,
+    restart,
+    restore_controller_binding,
+    start,
+    stop,
+    token_lifetime,
+)
 from sqlalchemy.exc import OperationalError
 
 from agent_runtime.backend import WorkloadSpec
 from agent_runtime.failpoints import SimulatedCrash
 from agent_runtime.pod import pod_manifest
-from scripts.k8s import ROOT, kubectl
+from scripts.k8s import STATE, kubectl
 
 pytestmark = pytest.mark.k8s
 
 
 @pytest.fixture
 def live(db):
-    env = start(db)
-    try:
-        yield env
-    finally:
-        stop(env)
+    with token_lifetime():
+        env = start(db)
+        try:
+            yield env
+        finally:
+            stop(env)
 
 
 def submit(live, behavior="sleep", **data):
@@ -189,7 +203,7 @@ def test_LC_7_outage_keeps_pending_and_allows_database_transitions(live, outage)
     finally:
         live.transport.offline = False
         if outage == "rbac":
-            kubectl("apply", "-f", str(ROOT / "deploy/k8s/resources.yaml"))
+            restore_controller_binding()
     reconcile(live)
     assert row(live, waiting)["status"] == "RUNNING"
     absent(cancelled)
@@ -277,7 +291,7 @@ def test_LC_11_labels_database_failure_and_uid_precondition(live, monkeypatch):
         response = original_request(method, path, **kwargs)
         if method == "DELETE" and response.status_code == 409:
             conflicts.append(response.json())
-            directory = ROOT / ".local/k8s/evidence"
+            directory = STATE / "evidence"
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "LC-11-uid-conflict.json").write_text(
                 json.dumps(response.json(), indent=2)
@@ -294,7 +308,6 @@ def test_LC_11_labels_database_failure_and_uid_precondition(live, monkeypatch):
 
 def test_ISO_1_ISO_5_ID_8_intended_credentials_and_template(live):
     import errno
-    import subprocess
 
     execution_id = submit(live, "inspect")
     live.failpoints.arm("before_cleanup")
@@ -334,13 +347,7 @@ def test_ISO_1_ISO_5_ID_8_intended_credentials_and_template(live):
     assert "/rootfs-probe" not in result["mount_points"]
     assert "/var/run/secrets/kubernetes.io/serviceaccount" not in result["mount_points"]
     assert "/run/secrets/kubernetes.io/serviceaccount" not in result["mount_points"]
-    image = json.loads(
-        subprocess.check_output(
-            ["docker", "--context", "colima", "image", "inspect", live.settings.agent_image],
-            text=True,
-        )
-    )[0]
-    baseline = {e.split("=", 1)[0] for e in image["Config"]["Env"]}
+    baseline = image_env_names(live.settings)
     runtime = {"HOME", "HOSTNAME"}
     kubelet = {
         "KUBERNETES_SERVICE_HOST",
@@ -353,7 +360,7 @@ def test_ISO_1_ISO_5_ID_8_intended_credentials_and_template(live):
         "KUBERNETES_PORT_443_TCP_PROTO",
     }
     assert set(result["env_names"]) == intended | baseline | runtime | kubelet
-    directory = ROOT / ".local/k8s/evidence"
+    directory = STATE / "evidence"
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "ISO-1-ID-8.json").write_text(json.dumps(result, indent=2))
     permissions = kubectl(
@@ -424,10 +431,7 @@ def test_ISO_5_admission_and_positive_controls(live):
     base = injected(live)
     response = live.backend.request("POST", live.backend.path, params={"dryRun": "All"}, json=base)
     assert response.status_code == 201
-    namespace = f"agent-psa-control-{uuid4().hex[:10]}"
-    kubectl("create", "namespace", namespace)
-    try:
-        kubectl("create", "serviceaccount", "agent-exec", "-n", namespace)
+    with psa_control_namespace() as namespace:
         cases = []
         for change in (
             "privileged",
@@ -473,13 +477,11 @@ def test_ISO_5_admission_and_positive_controls(live):
                 )
             else:
                 cases.append({"case": change, "positive_control": "passed"})
-        directory = ROOT / ".local/k8s/evidence"
+        directory = STATE / "evidence"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / "ISO-5-admission.json").write_text(json.dumps(cases, indent=2))
         assert not json.loads(kubectl("get", "pods", "-n", namespace, "-o", "json"))["items"]
         assert not live.backend.list_owned()
-    finally:
-        kubectl("delete", "namespace", namespace, "--wait=true", "--timeout=60s")
 
 
 def test_ISO_7_capacity_and_quota_backstop(live):

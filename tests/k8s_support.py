@@ -2,9 +2,11 @@ import json
 import socket
 import ssl
 import subprocess
+from contextlib import contextmanager, nullcontext
 from threading import Thread
 from time import monotonic, sleep
 from types import SimpleNamespace
+from uuid import uuid4
 
 import httpx
 import uvicorn
@@ -17,7 +19,17 @@ from agent_runtime.failpoints import Failpoints
 from agent_runtime.kubernetes import KubernetesBackend
 from agent_runtime.mockworkday import MockWorkday
 from agent_runtime.reconciler import Reconciler
-from scripts.k8s import IMAGE, KUBECTL, ROOT, STATE, guard, kubectl, require_owned
+from scripts.k8s import (
+    PROFILE,
+    ROOT,
+    STATE,
+    guard,
+    image,
+    image_metadata,
+    kubectl,
+    kubectl_args,
+    require_owned,
+)
 
 
 def poll(check, seconds=60):
@@ -31,7 +43,7 @@ def poll(check, seconds=60):
 
 
 def admin_create(manifest, dry_run=False):
-    args = [str(KUBECTL), "--context", "colima", "create", "-f", "-", "-o", "json"]
+    args = kubectl_args("create", "-f", "-", "-o", "json")
     if dry_run:
         args.append("--dry-run=server")
     return subprocess.run(
@@ -97,10 +109,12 @@ def start(db):
     require_owned()
     clear_pods()
     sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 8000 if PROFILE == "eks" else 0))
     port = sock.getsockname()[1]
     completion_sock = socket.socket()
-    completion_sock.bind(("127.0.0.1", 0))
+    completion_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    completion_sock.bind(("0.0.0.0", 8001) if PROFILE == "eks" else ("127.0.0.1", 0))
     completion_port = completion_sock.getsockname()[1]
     settings = Settings(
         str(db.engine.url),
@@ -108,8 +122,9 @@ def start(db):
         k8s_api_url=cluster["server"],
         k8s_ca_file=str(STATE / "ca.crt"),
         k8s_token_file=str(STATE / "controller.token"),
-        agent_image=IMAGE,
-        runtime_url=f"http://192.168.5.2:{completion_port}",
+        agent_image=image(),
+        k8s_profile=PROFILE,
+        runtime_url=completion_url(completion_port),
         max_active_executions=3,
     )
     transport = FaultTransport(settings.k8s_ca_file)
@@ -194,13 +209,14 @@ def restart(env):
 def evidence(name):
     pod = admin_pod(name)
     if pod:
-        directory = ROOT / ".local/k8s/evidence"
+        directory = STATE / "evidence"
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"{name}.json").write_text(
             json.dumps(
                 {
                     "metadata": {
-                        k: pod["metadata"].get(k) for k in ("name", "uid", "creationTimestamp")
+                        k: pod["metadata"].get(k)
+                        for k in ("name", "uid", "creationTimestamp", "annotations")
                     },
                     "status": pod.get("status", {}),
                 },
@@ -208,3 +224,80 @@ def evidence(name):
             )
         )
     return pod
+
+
+def completion_url(port):
+    if PROFILE != "eks":
+        return f"http://192.168.5.2:{port}"
+    from ipaddress import ip_address, ip_network
+    from urllib.parse import urlsplit
+
+    url = json.loads((STATE / "host.json").read_text())["completion_url"]
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "http"
+        or parsed.port != 8001
+        or parsed.username
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or ip_address(parsed.hostname) not in ip_network("10.30.0.0/16")
+    ):
+        raise ValueError("Expected the S1 PrivateLink IP on port 8001")
+    return url.rstrip("/")
+
+
+def token_lifetime():
+    if PROFILE == "eks":
+        from scripts.s1_host import controller_tokens
+
+        return controller_tokens(STATE)
+    return nullcontext()
+
+
+def image_env_names(settings):
+    if PROFILE == "eks":
+        return set(image_metadata()["env_names"])
+    data = json.loads(
+        subprocess.check_output(
+            ["docker", "--context", "colima", "image", "inspect", settings.agent_image], text=True
+        )
+    )[0]
+    return {e.split("=", 1)[0] for e in data["Config"]["Env"]}
+
+
+def restore_controller_binding():
+    if PROFILE == "eks":
+        from scripts.s1_kubernetes import controller_binding
+
+        subprocess.run(
+            kubectl_args("apply", "-f", "-"),
+            input=json.dumps(controller_binding()),
+            text=True,
+            check=True,
+        )
+    else:
+        kubectl("apply", "-f", str(ROOT / "deploy/k8s/resources.yaml"))
+
+
+@contextmanager
+def psa_control_namespace():
+    if PROFILE == "eks":
+        from scripts.s1_kubernetes import CONTROL_NAMESPACE, MARKER
+
+        value = json.loads(kubectl("get", "namespace", CONTROL_NAMESPACE, "-o", "json"))
+        labels = value["metadata"].get("labels", {})
+        if labels.get(MARKER) != "true" or any(
+            k.startswith("pod-security.kubernetes.io/") for k in labels
+        ):
+            raise RuntimeError("Expected the operator-owned, unlabeled PSA control namespace")
+        kubectl("get", "serviceaccount", "agent-exec", "-n", CONTROL_NAMESPACE)
+        yield CONTROL_NAMESPACE
+        return
+    namespace = f"agent-psa-control-{uuid4().hex[:10]}"
+    kubectl("create", "namespace", namespace)
+    try:
+        kubectl("create", "serviceaccount", "agent-exec", "-n", namespace)
+        yield namespace
+    finally:
+        kubectl("delete", "namespace", namespace, "--wait=true", "--timeout=60s")
