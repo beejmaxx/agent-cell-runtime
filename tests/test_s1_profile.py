@@ -252,20 +252,23 @@ def test_ISO_5_eks_control_never_mutates_namespace(monkeypatch, psa_label):
     )
 
 
-def test_LC_7_restore_only_namespaced_rolebinding(monkeypatch):
+def test_LC_7_harness_requests_operator_restore(monkeypatch):
     import k8s_support as support
+
+    from scripts.s1_kubernetes import controller_binding
 
     monkeypatch.setattr(support, "PROFILE", "eks")
     calls = []
-    monkeypatch.setattr(support, "kubectl_args", lambda *args: ["kubectl", *args])
-    monkeypatch.setattr(
-        support.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs))
-    )
+
+    def kubectl(*args):
+        calls.append(args)
+        return json.dumps(controller_binding()) if args[0] == "get" else "created"
+
+    monkeypatch.setattr(support, "kubectl", kubectl)
     support.restore_controller_binding()
-    manifest = json.loads(calls[0][1]["input"])
-    assert manifest["kind"] == "RoleBinding"
-    assert manifest["metadata"]["namespace"] == "agent-exec"
-    assert manifest["subjects"][0]["name"] == "agent-runtime-controllers"
+    assert calls[0][:3] == ("create", "configmap", "s1-restore-controller-binding")
+    assert calls[1][:3] == ("get", "rolebinding", "workload-controller")
+    assert all(call[0] != "apply" for call in calls)
 
 
 @pytest.mark.parametrize("role", ["lab-s1-controller", "s1-harness", "AccountFullAccessRole"])

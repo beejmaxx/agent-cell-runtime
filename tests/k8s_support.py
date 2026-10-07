@@ -270,12 +270,34 @@ def restore_controller_binding():
     if PROFILE == "eks":
         from scripts.s1_kubernetes import controller_binding
 
-        subprocess.run(
-            kubectl_args("apply", "-f", "-"),
-            input=json.dumps(controller_binding()),
-            text=True,
-            check=True,
+        kubectl(
+            "create",
+            "configmap",
+            "s1-restore-controller-binding",
+            "-n",
+            "agent-exec",
+            "--from-literal=action=restore-workload-controller",
         )
+        expected = controller_binding()
+
+        def restored():
+            raw = kubectl(
+                "get",
+                "rolebinding",
+                "workload-controller",
+                "-n",
+                "agent-exec",
+                "--ignore-not-found",
+                "-o",
+                "json",
+            )
+            if not raw.strip():
+                return False
+            actual = json.loads(raw)
+            return all(actual.get(key) == expected[key] for key in ("roleRef", "subjects"))
+
+        # The local operator handles the request; no operator credentials enter this host.
+        poll(restored, 120)
     else:
         kubectl("apply", "-f", str(ROOT / "deploy/k8s/resources.yaml"))
 

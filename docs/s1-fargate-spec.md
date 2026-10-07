@@ -129,7 +129,7 @@ Whether the kubelet shares the agent's network namespace is not a design depende
   - the **controller role** (trusted host): its EKS access entry maps it to the namespaced Role only; no IAM, network, or EKS access-entry administration permissions. For S1 tests only, it may `sts:AssumeRole` the `s1-harness` role;
   - the **Fargate Pod execution role**: ECR pull of one repository; trust limited to this cluster's Fargate profile (§0);
   - the **operator/Terraform IAM user** (`arn:aws:iam::729608197929:user/lab-operator-cli`): everything else, never present on the trusted host or in the execution domain;
-  - **`s1-harness` (test scaffolding, absent from production):** its trust policy allows only the trusted-host/controller instance role. Its EKS access entry has **`AmazonEKSAdminPolicy` scoped to exactly `agent-exec` and `agent-exec-psa-control`**, never cluster scope. LC-7 deletes/restores a RoleBinding; `AmazonEKSEditPolicy` lacks the necessary RBAC permissions. ISO-5 dry-runs control Pods in the operator-pre-created `agent-exec-psa-control` namespace, which has **no Pod Security Admission labels** and is not created/deleted by the EKS harness. The Colima profile may retain its temporary namespace. The operator also pre-creates the control service account. Runtime/controller calls always retain the controller identity; only admin test calls use `s1-harness`.
+  - **`s1-harness` (test scaffolding, absent from production):** its trust policy allows only the trusted-host/controller instance role. Its EKS access entry has **`AmazonEKSAdminPolicy` scoped to exactly `agent-exec` and `agent-exec-psa-control`**, never cluster scope. LC-7 deletes a RoleBinding; the operator restores it as a fixture step. `AmazonEKSEditPolicy` lacks the necessary RBAC permissions for deletion. `AmazonEKSAdminPolicy` does not bypass the RBAC escalation check: the harness cannot restore the grant, which is positive isolation evidence. No `bind` or `escalate` permission is granted. ISO-5 dry-runs control Pods in the operator-pre-created `agent-exec-psa-control` namespace, which has **no Pod Security Admission labels** and is not created/deleted by the EKS harness. The Colima profile may retain its temporary namespace. The operator also pre-creates the control service account. Runtime/controller calls always retain the controller identity; only admin test calls use `s1-harness`.
 
   **Rationale (reviewer-approved):** S1's attacker is an execution, with no path to the trusted host. These admin actions are test-only and namespace-scoped on that host. This exception is not a production authority model. EKS's separate service role for managing the control plane and its required EKS/Fargate service-linked roles are infrastructure, not these four caller identities. Terraform owns newly required service roles so they are removed during S1 teardown; pre-existing shared service roles are not adopted or destroyed.
 - **IAM to Kubernetes identity:** EKS access entries map an IAM role to Kubernetes groups. The controller's role maps to group `agent-runtime-controllers`, bound to the same namespaced Role as R2 (Pods in `agent-exec` only). It authenticates with `aws eks get-token`: a presigned STS request. The token file is refreshed by a small loop, because R2's backend re-reads it on every request.
@@ -360,3 +360,15 @@ cluster group ID even when it lacks experiment tags.
   bucket returned CNAME `s3-r-w.us-east-2.amazonaws.com`; DNS query evidence
   recorded `BLOCK/NXDOMAIN`. Add that exact observed name under the approved
   chain-inspection adjustment rule. No wildcard or STS-policy change.
+
+
+### LC-7 operator fixture decision (2026-10-08)
+
+The reviewer accepts the harness’s rejected RoleBinding restoration as positive
+isolation evidence. LC-7 tests that the runtime fails closed while the binding
+is missing; its assertions are unchanged. The EKS harness requests restoration
+using ConfigMap `agent-exec/s1-restore-controller-binding`. The local operator
+runner polls for that fixed request, applies only the source-defined controller
+binding (never a supplied manifest), and removes the request. The harness waits
+for the exact original roleRef and subjects. No operator credentials enter the
+host, and no bind/escalate or cluster-scoped grant is added to the harness.

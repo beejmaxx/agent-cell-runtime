@@ -206,7 +206,7 @@ def kubectl(config, *args, manifest=None):
     ).stdout
 
 
-def ssm(instance, commands, timeout=900):
+def ssm(instance, commands, timeout=900, on_poll=None):
     sent = aws_json(
         "ssm",
         "send-command",
@@ -226,6 +226,8 @@ def ssm(instance, commands, timeout=900):
             "ssm", "list-command-invocations", "--command-id", command_id, "--details"
         )["CommandInvocations"]
         if not items or items[0]["Status"] in {"Pending", "InProgress", "Delayed"}:
+            if on_poll is not None:
+                on_poll()
             continue
         result = aws_json(
             "ssm", "get-command-invocation", "--command-id", command_id, "--instance-id", instance
@@ -334,6 +336,31 @@ def up():
     )
 
 
+def restore_fixture_binding(config):
+    raw = kubectl(
+        config,
+        "get",
+        "configmap",
+        "s1-restore-controller-binding",
+        "-n",
+        "agent-exec",
+        "--ignore-not-found",
+        "-o",
+        "json",
+    )
+    if not raw.strip():
+        return
+    request = json.loads(raw)
+    if request.get("data") != {"action": "restore-workload-controller"}:
+        raise RuntimeError("Unexpected harness fixture request")
+    from scripts.s1_kubernetes import controller_binding
+
+    # The request carries no manifest: the operator restores only the fixed fixture.
+    kubectl(config, "apply", "-f", "-", manifest=controller_binding())
+    kubectl(config, "delete", "configmap", "s1-restore-controller-binding", "-n", "agent-exec")
+    print("Operator restored the fixed workload-controller binding", flush=True)
+
+
 def test():
     run_approved()
     state_guard()
@@ -344,6 +371,7 @@ def test():
         config["host_instance_id"],
         ["runuser -u ubuntu -- setsid sh -c " + shlex.quote(command)],
         timeout=7200,
+        on_poll=lambda: restore_fixture_binding(config),
     )
     export_evidence(config)
     result = ssm(config["host_instance_id"], ["cat /home/ubuntu/s1/.local/s1/e1.exit"]).strip()

@@ -305,3 +305,28 @@ def test_ISO_1_operator_identity_is_exact(monkeypatch, tmp_path, arn):
     else:
         with pytest.raises(RuntimeError, match="Expected the S1 operator"):
             s1.state_guard()
+
+
+@pytest.mark.parametrize(
+    "fixture_request", [None, {"action": "restore-workload-controller"}, {"action": "grant-admin"}]
+)
+def test_ISO_1_operator_restores_only_fixed_fixture(monkeypatch, fixture_request):
+    from scripts.s1_kubernetes import controller_binding
+
+    calls = []
+
+    def kubectl(config, *args, **kwargs):
+        calls.append((args, kwargs))
+        return "" if fixture_request is None else json.dumps({"data": fixture_request})
+
+    monkeypatch.setattr(s1, "kubectl", kubectl)
+    if fixture_request and fixture_request["action"] != "restore-workload-controller":
+        with pytest.raises(RuntimeError, match="Unexpected harness fixture request"):
+            s1.restore_fixture_binding({})
+        assert len(calls) == 1
+    else:
+        s1.restore_fixture_binding({})
+        assert len(calls) == (1 if fixture_request is None else 3)
+        if fixture_request:
+            assert calls[1][1] == {"manifest": controller_binding()}
+            assert calls[2][0][:3] == ("delete", "configmap", "s1-restore-controller-binding")
