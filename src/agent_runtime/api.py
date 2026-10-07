@@ -12,6 +12,7 @@ from agent_runtime.db import canonical, digest
 from agent_runtime.executions import TERMINAL, APIError, create_execution, owned, transition, view
 
 router = APIRouter(prefix="/api/v1")
+completion_router = APIRouter(prefix="/api/v1")
 
 
 class CreateBody(BaseModel):
@@ -103,7 +104,7 @@ def cancel(request: Request, execution_id: UUID):
     return view(row)
 
 
-@router.post("/executions/{execution_id}/complete")
+@completion_router.post("/executions/{execution_id}/complete")
 def complete(request: Request, execution_id: UUID, body: CompleteBody):
     s = request.app.state
     header = request.headers.get("Authorization", "")

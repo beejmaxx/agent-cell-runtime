@@ -10,7 +10,7 @@ import httpx
 import uvicorn
 from conftest import Issuer
 
-from agent_runtime.app import create_app
+from agent_runtime.app import create_app, create_completion_app
 from agent_runtime.clock import Clock
 from agent_runtime.config import Settings
 from agent_runtime.failpoints import Failpoints
@@ -99,6 +99,9 @@ def start(db):
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
+    completion_sock = socket.socket()
+    completion_sock.bind(("127.0.0.1", 0))
+    completion_port = completion_sock.getsockname()[1]
     settings = Settings(
         str(db.engine.url),
         workload_backend="kubernetes",
@@ -106,7 +109,7 @@ def start(db):
         k8s_ca_file=str(STATE / "ca.crt"),
         k8s_token_file=str(STATE / "controller.token"),
         agent_image=IMAGE,
-        runtime_url=f"http://192.168.5.2:{port}",
+        runtime_url=f"http://192.168.5.2:{completion_port}",
         max_active_executions=3,
     )
     transport = FaultTransport(settings.k8s_ca_file)
@@ -133,6 +136,15 @@ def start(db):
     thread = Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
     thread.start()
     poll(lambda: server.started, 10)
+    completion_app = create_completion_app(app)
+    completion_server = uvicorn.Server(
+        uvicorn.Config(completion_app, log_level="critical", access_log=False)
+    )
+    completion_thread = Thread(
+        target=completion_server.run, kwargs={"sockets": [completion_sock]}, daemon=True
+    )
+    completion_thread.start()
+    poll(lambda: completion_server.started, 10)
     client = httpx.Client(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=10)
     return SimpleNamespace(
         db=db,
@@ -149,6 +161,9 @@ def start(db):
         server=server,
         thread=thread,
         sock=sock,
+        completion_server=completion_server,
+        completion_thread=completion_thread,
+        completion_sock=completion_sock,
         mw=mw,
         http=http,
     )
@@ -156,6 +171,9 @@ def start(db):
 
 def stop(env):
     env.transport.offline = False
+    env.completion_server.should_exit = True
+    env.completion_thread.join(10)
+    env.completion_sock.close()
     env.server.should_exit = True
     env.thread.join(10)
     env.client.close()

@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
-from agent_runtime.api import error_response, router
+from agent_runtime.api import completion_router, error_response, router
 from agent_runtime.auth import Auth
 from agent_runtime.backend import FakeBackend
 from agent_runtime.clock import Clock
@@ -77,6 +77,21 @@ def create_app(
     app.state.reconciler = reconciler
     app.state.auth = Auth(db, mw, clock)
     app.include_router(router)
+    app.include_router(completion_router)
+    install_error_handlers(app)
+    return app
+
+
+def create_completion_app(runtime):
+    app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, redirect_slashes=False)
+    # Share the live state so a controller restart cannot leave cleanup on an old backend.
+    app.state = runtime.state
+    app.include_router(completion_router)
+    install_error_handlers(app)
+    return app
+
+
+def install_error_handlers(app):
 
     @app.exception_handler(APIError)
     def api_error(request, exc):
@@ -93,5 +108,3 @@ def create_app(
     @app.exception_handler(HTTPException)
     def http_error(request, exc):
         return error_response(request, exc.status_code, "HTTP_ERROR", str(exc.detail))
-
-    return app
