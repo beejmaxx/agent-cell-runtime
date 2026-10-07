@@ -101,7 +101,6 @@ def main():
         for name in NAMESPACES:
             print(kubectl("delete", "namespace", name, "--ignore-not-found"), end="")
     elif command == "image":
-        require_owned()
         subprocess.run(
             ["docker", "--context", "colima", "build", "-t", IMAGE, str(ROOT / "agent")], check=True
         )

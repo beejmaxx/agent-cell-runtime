@@ -82,7 +82,7 @@ def run():
         }
         (evidence / f"{name}-status.json").write_text(json.dumps(sanitized, indent=2))
 
-    def launch(behavior, disk_mib=None, volume_limit=None):
+    def launch(behavior):
         execution_id = str(uuid4())
         credential = credentials[execution_id] = secrets.token_urlsafe(32)
         spec = SimpleNamespace(
@@ -93,26 +93,6 @@ def run():
         )
         name = f"exec-{execution_id}"
         manifest = pod_manifest(name, spec, settings)
-        if volume_limit:
-            manifest["spec"]["volumes"][0]["emptyDir"]["sizeLimit"] = volume_limit
-        if disk_mib:
-            # Report a bounded, fsynced write to the probe receiver, then await kubelet eviction.
-            manifest["spec"]["containers"][0]["command"] = [
-                "python",
-                "-c",
-                f"""
-import os, time
-from fake_agent import complete
-with open('/tmp/fill', 'wb') as output:
-    for _ in range({disk_mib}):
-        output.write(b'x' * (1024 * 1024))
-    output.flush()
-    os.fsync(output.fileno())
-complete({{'written_bytes': os.stat('/tmp/fill').st_size}})
-while True:
-    time.sleep(1)
-""",
-            ]
         response = client.post(path, json=manifest)
         assert response.status_code == 201, f"Probe create failed: {response.status_code}"
         pod = response.json()
@@ -152,45 +132,15 @@ while True:
     try:
         execution_id, name, uid = launch("inspect")
         result = await_result(execution_id, name)
-        assert result["cpu_max"] == "25000 100000", result["cpu_max"]
-        assert "nr_throttled" in result["cpu_stat"]
         assert result["aud"] == ["agent-cell-gateway"]
         assert result["pod_uid"] == uid
         assert result["pod_name"] == name
         assert isinstance(result["exp"], (int, float))
         assert result["sub"] == "system:serviceaccount:agent-exec:agent-exec"
         print(
-            f"PASS: cpu.max/cpu.stat readable; 250m quota; projected audience, exp, and Pod UID; issued lifetime {result['token_lifetime']} s",
+            f"PASS: projected audience, exp, and Pod UID; issued lifetime {result['token_lifetime']} s",
             flush=True,
         )
-        delete(name, uid)
-        for mib, volume_limit, mechanism in (
-            (48, None, "emptydir"),
-            (80, "96Mi", "ephemeral local storage"),
-        ):
-            execution_id, name, uid = launch("fill_disk", disk_mib=mib, volume_limit=volume_limit)
-            result = await_result(execution_id, name)
-            assert result["written_bytes"] == mib * 1024 * 1024
-            print(f"Storage probe: fsynced {mib} MiB; waiting for {mechanism} eviction", flush=True)
-            until = time.monotonic() + 180
-            while time.monotonic() < until:
-                pod = observe(name)
-                status = pod.get("status", {})
-                if status.get("phase") == "Failed":
-                    assert status.get("reason") == "Evicted", status
-                    assert mechanism in status.get("message", "").lower(), status
-                    print("PASS: " + status["message"], flush=True)
-                    break
-                time.sleep(1)
-            else:
-                raise AssertionError(
-                    f"{mechanism} limit not enforced within 180 s after the confirmed write"
-                )
-            delete(name, uid)
-        node = json.loads(kubectl("get", "node", "colima", "-o", "json"))
-        conditions = node["status"]["conditions"]
-        (evidence / "node-conditions.json").write_text(json.dumps(conditions, indent=2))
-        assert next(c["status"] for c in conditions if c["type"] == "DiskPressure") == "False"
     finally:
         for name, uid in pods:
             delete(name, uid)

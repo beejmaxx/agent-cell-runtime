@@ -66,3 +66,13 @@ that assertion and rerunning both storage probes passed; neither test was skippe
 
 These observations establish that the preflight mechanisms work on this cluster;
 they make no network isolation or hostile-code sandbox claim.
+
+
+## 2026-10-07 — R2 scope narrowed
+
+The CPU and storage observations above are historical results of the original
+preflight, not isolation evidence. After threat-model revision 1, the approved
+R2 scope removed CPU, OOM, storage eviction, filesystem freshness, and containment
+probes. Their fake-agent behaviors and preflight code have been removed. Current
+`make k8s-preflight` checks projected-token issuance only, alongside setup guards.
+The fixed resource template, controller capacity limit, and API quota remain.

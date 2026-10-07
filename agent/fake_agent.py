@@ -38,15 +38,6 @@ def complete(result):
     raise SystemExit(1)
 
 
-def cpu_stat():
-    return {
-        k: int(v)
-        for k, v in (
-            line.split() for line in Path("/sys/fs/cgroup/cpu.stat").read_text().splitlines()
-        )
-    }
-
-
 def inspect():
     directory = Path("/var/run/secrets/agent-cell")
     encoded = (directory / "token").read_text().split(".")[1]
@@ -62,8 +53,10 @@ def inspect():
             api_status = response.status
     except HTTPError as exc:
         api_status = exc.code
+    rootfs_readback = None
     try:
         Path("/rootfs-probe/x").write_text("probe")
+        rootfs_readback = Path("/rootfs-probe/x").read_text()
         rootfs_errno = 0
     except OSError as exc:
         rootfs_errno = exc.errno
@@ -80,6 +73,7 @@ def inspect():
         "uid": os.getuid(),
         "gid": os.getgid(),
         "rootfs_errno": rootfs_errno,
+        "rootfs_readback": rootfs_readback,
         "cap_eff": next(
             line.split()[1]
             for line in Path("/proc/self/status").read_text().splitlines()
@@ -88,8 +82,6 @@ def inspect():
         "mount_points": [
             line.split()[1] for line in Path("/proc/self/mounts").read_text().splitlines()
         ],
-        "cpu_max": Path("/sys/fs/cgroup/cpu.max").read_text().strip(),
-        "cpu_stat": cpu_stat(),
     }
 
 
@@ -108,39 +100,6 @@ def main():
         result = {"slept": data["seconds"]}
     elif behavior == "inspect":
         result = inspect()
-    elif behavior == "write_sentinel":
-        Path("/tmp/sentinel").write_text("synthetic sentinel")
-        result = {"sentinel": Path("/tmp/sentinel").read_text()}
-    elif behavior == "check_sentinel":
-        result = {"exists": Path("/tmp/sentinel").exists()}
-    elif behavior == "cpu_burn":
-        before = cpu_stat()
-        until = time.monotonic() + data["seconds"]
-        while time.monotonic() < until:
-            pass
-        after = cpu_stat()
-        result = {
-            "cpu_max": Path("/sys/fs/cgroup/cpu.max").read_text().strip(),
-            **{key: after[key] - before[key] for key in ("nr_throttled", "throttled_usec")},
-        }
-    elif behavior == "oom":
-        blocks = []
-        while True:
-            blocks.append(bytearray(1024 * 1024))
-    elif behavior == "fill_disk":
-        with open("/tmp/fill", "wb") as output:
-            output.writelines(b"x" * (1024 * 1024) for _ in range(data["mib"]))
-            output.flush()
-            os.fsync(output.fileno())
-        while True:
-            time.sleep(1)
-    elif behavior == "work":
-        start = time.time()
-        value = 0
-        for i in range(4_000_000):
-            value = (value + i) % 1000003
-        end = time.time()
-        result = {"start": start, "end": end, "elapsed_seconds": end - start}
     else:
         raise SystemExit(1)
     complete(result)
