@@ -1,11 +1,12 @@
 import base64
 import json
 import os
-import ssl
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from probes import CA_PATH, dns, metadata, probe, request, url_target
 
 
 def complete(result):
@@ -43,16 +44,19 @@ def inspect():
     encoded = (directory / "token").read_text().split(".")[1]
     claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
     pod = claims["kubernetes.io"]["pod"]
-    request = Request(
-        "https://kubernetes.default.svc/api",
-        headers={"Authorization": "Bearer " + (directory / "token").read_text()},
+    api = probe(
+        {
+            "name": "projected token API",
+            "host": os.environ["KUBERNETES_SERVICE_HOST"],
+            "port": int(os.getenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")),
+            "server_name": "kubernetes.default.svc",
+            "tls": True,
+            "ca_file": CA_PATH,
+            "method": "GET",
+            "path": "/api",
+            "projected_token": True,
+        }
     )
-    context = ssl.create_default_context(cafile=str(directory / "ca.crt"))
-    try:
-        with urlopen(request, context=context, timeout=5) as response:
-            api_status = response.status
-    except HTTPError as exc:
-        api_status = exc.code
     rootfs_readback = None
     try:
         Path("/rootfs-probe/x").write_text("probe")
@@ -69,7 +73,10 @@ def inspect():
         "pod_name": pod["name"],
         "pod_uid": pod["uid"],
         "env_names": sorted(os.environ),
-        "api_status": api_status,
+        "api_status": api.get("status"),
+        "api_probe": api,
+        "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        "kernel_release": os.uname().release,
         "uid": os.getuid(),
         "gid": os.getgid(),
         "rootfs_errno": rootfs_errno,
@@ -100,8 +107,46 @@ def main():
         result = {"slept": data["seconds"]}
     elif behavior == "inspect":
         result = inspect()
+    elif behavior == "probe":
+        result = {"probes": [probe(target) for target in data.get("targets", [])]}
+        if data.get("metadata"):
+            result["metadata"] = metadata()
+        if "dns" in data:
+            result["dns"] = [dns(**query) for query in data["dns"]]
+    elif behavior == "listen":
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Listener(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"s1-execution-listener")
+
+            def log_message(self, *args):
+                pass
+
+        with HTTPServer(("0.0.0.0", data.get("port", 8080)), Listener) as server:
+            server.serve_forever()
+        return
+    elif behavior == "binding":
+        target = url_target(
+            "cross-execution completion",
+            f"{os.environ['RUNTIME_URL']}/api/v1/executions/{data['other_execution']}/complete",
+            "POST",
+        )
+        observation, _ = request(
+            target,
+            headers={
+                "Authorization": f"Execution {os.environ['EXECUTION_CREDENTIAL']}",
+                "Content-Type": "application/json",
+            },
+            body=b'{"result":{"synthetic":"cross-execution"}}',
+        )
+        result = {"cross_execution": observation}
     else:
         raise SystemExit(1)
+    if data.get("hold_seconds"):
+        time.sleep(data["hold_seconds"])
     complete(result)
 
 
