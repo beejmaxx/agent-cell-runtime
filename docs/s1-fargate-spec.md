@@ -114,6 +114,13 @@ Whether the kubelet shares the agent's network namespace is not a design depende
   - **An unauthenticated probe proves nothing about an endpoint policy unless the target accepts anonymous requests.** An agent without AWS credentials is refused by a normal bucket anyway. E4 therefore uses a canary bucket whose policy allows anonymous `PutObject` only through this VPC's S3 endpoint (`aws:SourceVpce`, which keeps the bucket non-public). The restricted endpoint policy must be what refuses it, and E5 shows that a full-access endpoint policy lets the same request through. ECR has no anonymous access, so its endpoint policy is checked statically.
 - **PrivateLink hides the caller's address.** The gateway sees the NLB's private IP as the source of every request, so network origin cannot identify an execution. Identity comes from the per-execution credential: in S1, R2's completion credential (r2-spec D5); with the gateway, the projected token.
 - **Endpoint-service permissions are principals, not networks.** The endpoint service allows only the S1 Terraform role and requires acceptance. Which workloads can use it is decided by where the interface endpoint exists (only the execution VPC) and its security group (only the execution Pod security group).
+  **Checkpoint-4 finding:** AWS rejects the current operator ARN
+  `arn:aws:iam::729608197929:role/managed/AccountFullAccessRole` with
+  `Client.InvalidPrincipal`: endpoint-service principal ARNs cannot contain
+  IAM path components ([EC2 API restriction](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcEndpointServicePermissions.html)).
+  The planned principal is therefore not deployable. No account-wide or wildcard
+  substitute was used. A pathless operator design requires review before retry.
+
 - **DNS is an egress channel that security groups cannot close.** The Pod can always send queries to the VPC resolver. DNS Firewall, associated with the execution VPC only, applies an allowlist. Query logging records queries the resolver processes and the firewall's action, but not queries answered from its cache, so every probe uses a fresh name.
 - **Execution Pod security group rules** (the cluster SG is not attached): egress TCP 443 to the cluster SG, with the cluster SG admitting TCP 443 from the Pod SG; the cluster SG may reach the Pod on TCP 10250 (kubelet: logs, exec). No port 53 rules: there is no CoreDNS. AWS publishes no validated "no CoreDNS" minimum, so a Pod that fails to start with these rules is a finding, not a reason to attach the whole cluster SG.
 - **Four distinct authority roles (the fourth is test scaffolding):**
@@ -274,3 +281,15 @@ E2's numbers are judged by the user against the product need.
   providers. Teardown retains the issuer locally and repeats that exact lookup.
 - Target less than three hours of uptime. A blocker lasting about 20 minutes
   ends the run: export evidence, tear down, and report unfinished experiments.
+
+
+### First checkpoint-4 attempt: unresolved findings
+
+- The approved exact-issuer `GetOpenIDConnectProvider` call was also explicitly
+  denied by SCP `p-5fs30qru`, for issuer
+  `oidc.eks.us-east-2.amazonaws.com/id/D73CABB693770EDF0B9025002907EA16`.
+  This is **not** `NoSuchEntity` and does not prove absence. E9 and a fully clean
+  OIDC inventory remain unverified; no permissions bypass was attempted.
+- PrivateLink's IAM-path restriction above blocked setup before any execution
+  Pod was launched. STS/DNS changes were neither needed nor tested. See the
+  dated results and teardown evidence in [experiments.md](experiments.md).

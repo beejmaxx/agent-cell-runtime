@@ -9,8 +9,10 @@ from the foundation/bootstrap directories as part of S1.
 
 ## Review before apply
 
-Checkpoint 3 runs initialization, formatting, validation and planning only.
-No apply/destroy has occurred. The operator IP comes from
+The first checkpoint-4 apply was blocked by PrivateLink rejecting the current
+operator ARN's `/managed/` IAM path. `s1-up` now rejects this configuration before
+AWS calls; a reviewed pathless operator design is required before retry. See
+`docs/experiments.md` for the attempt and cleanup evidence. The operator IP comes from
 `curl --noproxy '*' https://checkip.amazonaws.com`, following Mock Workday's
 existing direct-egress detection. A changed IP requires a new plan.
 
@@ -105,7 +107,9 @@ service roles and endpoint connections. Exported local evidence is intentional.
 - The project SCP currently explicitly denies `iam:ListOpenIDConnectProviders`.
   The approved alternative queries `GetOpenIDConnectProvider` for the exact ARN
   derived from the recorded cluster issuer. Only `NoSuchEntity` proves absence;
-  authorization failures remain incomplete. Evidence is retained locally.
+  authorization failures remain incomplete. The exact lookup was also explicitly
+  SCP-denied during the first attempt, so E9 remains unverified. Evidence is
+  retained locally.
 - The current Free plan is active with $200 remaining credits. Planning does
   not verify that every create action/quota will succeed. The spec's running
   estimate is roughly $0.20–0.25/hour plus usage; it is not a spending cap.

@@ -309,3 +309,141 @@ Local evidence: `.local/s1/checkpoint3-final-unit.log`,
 See `infra/experiments/fargate/README.md` for the review and run workflow.
 No AWS resources were created or changed; no apply/destroy or local Kubernetes
 start occurred. Stop here for plan review before checkpoint 4.
+
+## 2026-10-08 — S1 checkpoint 4 first attempt: setup blocked; teardown
+
+The reviewer approved the narrow STS baseline (`sts:GetCallerIdentity` only),
+DNS `BLOCK/NXDOMAIN` with redirection inspection, and an exact-issuer IAM lookup
+instead of the SCP-denied provider listing. Those decisions and the lookup's
+error handling are committed together in `4683504`. No STS action or DNS name
+was broadened in this attempt.
+
+The approved plan was selected as `.local/s1/plan.tfplan`, with the same direct
+operator egress `120.229.48.82/32`. `S1_RUN_APPROVED=1
+S1_STS_GET_CALLER_IDENTITY_ONLY=true make s1-up` began at
+**2026-10-07 19:17:23 UTC** (2026-10-08 03:17:23 Asia/Shanghai). Resources were
+created only in the S1 state/Region. No foundation/bootstrap configuration or
+Mock Workday resource was changed.
+
+**Verified setup blocker:** CloudTrail records `ModifyVpcEndpointServicePermissions`
+at **19:20:36 UTC**, request ID `d96c476a-2489-451f-a2f4-3012b4d622fc`, with
+`Client.InvalidPrincipal` for
+`arn:aws:iam::729608197929:role/managed/AccountFullAccessRole`.
+The endpoint service was created, but its allowed-principal list remained empty
+and no callback interface endpoint was created. AWS explicitly does not support
+principal ARNs containing IAM path components in this API
+([API restriction](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeVpcEndpointServicePermissions.html)).
+The plan therefore passed static validation but could not establish PrivateLink.
+No account-root or wildcard principal was substituted. A pathless operator
+identity needs a reviewed design before retry.
+
+**Verified E9 visibility failure:** querying the exact ARN
+`arn:aws:iam::729608197929:oidc-provider/oidc.eks.us-east-2.amazonaws.com/id/D73CABB693770EDF0B9025002907EA16`
+also returned `AccessDenied` with an explicit deny in SCP `p-5fs30qru`.
+It did **not** return `NoSuchEntity`. No OIDC absence claim follows from this
+response, and no SCP/permission bypass was attempted.
+
+The EKS control plane became active; the Fargate profile reached `ACTIVE` with
+no health issues. Neither proves that execution Pods start. Live IAM reads
+confirmed the controller and Fargate role trust/permissions, harness trust only
+to the controller, and `AmazonEKSAdminPolicy` scoped exactly to `agent-exec` and
+`agent-exec-psa-control`. The controller had zero EKS access-policy associations.
+The operator role was distinct from these three roles. Namespace setup had not
+run, so the control-namespace and per-Pod ENI portions of E9 remain unverified.
+
+| Experiment | Result in this attempt |
+|---|---|
+| E1 | Blocked before harness setup; **0 Kubernetes tests ran**. No lifecycle assertion or timeout was weakened. |
+| E2 | Not run; no cold-start measurements. |
+| E3 | Not run; no boot-ID/kernel comparison. |
+| E4 | Not run; no execution egress or callback-path evidence. |
+| E5 | Not run; neither mutation control was exercised. |
+| E6 | Not run; no DNS probe or redirection-chain finding. |
+| E7 | Not run; publishing an image does not prove a Fargate image pull or container credential isolation. |
+| E8 | Not run; prepared privilege/admission probes were not executed. |
+| E9 | Partial static/live role evidence above; failed PrivateLink configuration and unverified OIDC absence block a pass. |
+| E10 | Not run; no cross-execution completion test. |
+
+The image was built as `linux/amd64`, pushed to the tagged S1 ECR repository,
+pulled by digest and compared to the built image:
+`sha256:c92e4a506cb8457473bfe654b37c4233722ffdc2d8a25eacd4c582c62f0078c9`.
+Command: `DOCKER_HOST=unix:///Users/bijan/.colima/s1-builder/docker.sock
+uv run python -m scripts.s1_image`. The temporary registry credentials were not
+persisted. A separate Docker-only Colima builder was used and stopped; the
+existing local Kubernetes profile remained stopped throughout.
+
+To stop further provisioning after the known blocker, Terraform received one
+SIGINT for graceful shutdown. Terraform 1.16.4 instead panicked while serializing
+an in-progress resource: `Instance aws_eks_fargate_profile.execution has status
+ObjectStatus(0), which cannot be saved in state`. The saved state was backed up
+and reconciled with AWS before cleanup. It retained the failed endpoint service
+as tainted, but had no saved instance for the Fargate profile or the DNS allowlist.
+The teardown's explicit profile deletion covers the former. The unattached
+allowlist `rslvr-fdl-62e8036b33f64041` was verified S1-tagged and deleted explicitly
+at **19:31:23 UTC**; its only sibling firewall rule referenced the blocklist.
+
+Validation before apply: **183 unit tests passed, 22 deselected** in 105.39 s;
+14 focused operator/OIDC tests passed. The deselected set remains 18 Kubernetes
+and four unavailable HTTP integration tests. The five explicit experiment
+functions collected successfully but were not executed. Ruff check/format and
+`git diff --check` passed. Tool versions: Terraform 1.16.4, AWS provider 6.67.0,
+Python 3.12, uv 0.12.5 on the host, EKS 1.36/platform `eks.14`, SSM agent
+3.3.4793.0, Docker client 20.10.11/server 29.5.2. Host Ubuntu 24.04 bootstrap
+finished successfully at **19:21:27 UTC**.
+
+Raw local evidence (ignored by Git): `.local/s1/checkpoint4-up.log`,
+`checkpoint4-session.json`, `checkpoint4-image-push.log`, `image.json`,
+`privatelink-invalid-principal.json` (CloudTrail fields with identity-session
+metadata omitted), `e9-roles.json`, `e9-partial-config.json`,
+`e9-partial-live.json` (exact lookup denial and tool exception),
+`partial-state-backup.json`, `partial-state-list.txt`,
+`cleanup-untracked-domain-list.json`, `checkpoint4-down.log`,
+`host-evidence.tgz`, `dns-query-events.json`, `checkpoint4-unit.log`,
+`checkpoint4-oidc-tests.log`, `experiment-collection.log`, and builder logs.
+
+A post-finding pre-apply guard now rejects the current path-bearing operator ARN
+before contacting AWS. Its focused suite passed **15 tests**; this changes no
+principal permissions and does not implement an unreviewed replacement role.
+
+**Cleanup result at 19:46 UTC: incomplete, authentication blocked.**
+`S1_RUN_APPROVED=1 make s1-down` deleted the Fargate profile and cluster; an
+independent `ListClusters` returned an empty list. Its subsequent Terraform
+destroy was blocked by the crashed apply's stale S1 lock. After verifying that
+the original process had exited and that the lock referenced only
+`dev/experiments/s1-fargate.tfstate`,
+`terraform -chdir=infra/experiments/fargate force-unlock -force
+f23b34f7-7b4d-41f5-ce1d-c3319d4a0e6a` released it. Locking remained enabled.
+
+The second `make s1-down` planned **64 destructions** and confirmed **63**,
+including the trusted host, EIP, endpoints, endpoint service/NLB, canary,
+fake-agent ECR repository/images, S1 roles and both new service-linked roles.
+The last VPC deletion returned HTTP 400 with provider error `unexpected EOF`
+(request ID `71564542-27ef-4716-9eec-70de3b848636`). A subsequent state list
+contained only `aws_vpc.execution`. This is a saved-state observation, **not**
+proof of whether the VPC still exists or which service-created dependency may
+remain. The possible outstanding VPC is `vpc-09ffaf540e50e3e9a`; its recorded
+cluster security group is `sg-097473168467cf37f`.
+
+Before that question could be resolved, both the MCP connection and local CLI
+lost valid AWS credentials. CLI `GetCallerIdentity` returned `ExpiredToken`.
+The local CLI is 2.37.10 and supports `aws login`; the installed Signing In to
+AWS skill requires explicit confirmation before invoking that command. A
+confirmation request was issued for `aws login --profile agent-runtime
+--region us-east-2`; no answer had arrived when this record was committed.
+Another `make s1-down` stopped at its caller guard, and `make s1-leftovers`
+could not complete authentication. **No clean inventory claim is made.**
+Even after reauthentication, the exact OIDC lookup's SCP denial must remain an
+incomplete check unless visibility is restored or new evidence is agreed.
+
+Known billable compute, public IPv4 and interface endpoints were deleted within
+about 27 minutes of apply start; exact final resource absence is not verified.
+The session did not leave the local builder or Kubernetes running. Next action
+after approved sign-in: inspect the recorded execution VPC's ENIs/security
+groups, remove only verified S1 leftovers, rerun `make s1-down` and
+`make s1-leftovers`, then update this record with actual results.
+
+Additional cleanup evidence: `.local/s1/checkpoint4-down-retry.log`,
+`checkpoint4-down-final.log`, `checkpoint4-unlock.log`, `cleanup-progress.json`,
+`cleanup-vpc-dependencies.json` (MCP credential failure),
+`cleanup-auth-error.log`, `checkpoint4-leftovers.log`,
+`checkpoint4-final-focused.log`, and `checkpoint4-handoff.txt`.
