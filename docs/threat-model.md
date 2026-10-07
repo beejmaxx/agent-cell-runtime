@@ -1,6 +1,6 @@
 # Threat model (v1)
 
-**Status:** decided in the R0 design review. Guarantees listed here are design goals until a test or experiment demonstrates them.
+**Status:** decided in the R0 design review; revised 2026-10-07 (revision 1: compromise of an execution's guest environment, including container escape, is in scope). Guarantees listed here are design goals until a test or experiment demonstrates them.
 
 ## Core assumption
 
@@ -39,9 +39,30 @@ Where possible, the hostile workload has nothing to steal and nowhere to go, rat
   2. EC2 nodes require IMDSv2 with response hop limit 1, so ordinary Pods cannot obtain the node's instance-profile credentials even if the network rule is missing. The metadata endpoint itself stays enabled, because node components depend on it.
   3. Untrusted execution Pods may not use `hostNetwork` (or other host namespaces). This is enforced by admission policy (Pod Security Admission `restricted` or equivalent), not by convention. The hop-limit defense depends on it.
   4. The node IAM role is minimally privileged. For example, the VPC CNI's permissions move to its own workload identity, so stolen node credentials grant little.
-- **No agent DNS resolution beyond what its granted connectivity requires.** The cluster DNS resolver forwards lookups for external names, so allowing arbitrary DNS is an exfiltration channel (DNS tunneling). Kubernetes `NetworkPolicy` cannot filter by query name. Either the agent gets no DNS at all, or DNS-aware egress enforcement allows only required internal names.
+- **No agent DNS resolution beyond what its granted connectivity requires.** The cluster DNS resolver forwards lookups for external names, so allowing arbitrary DNS is an exfiltration channel (DNS tunneling). Kubernetes `NetworkPolicy` cannot filter by query name. Either the agent gets no DNS at all, or DNS-aware egress enforcement allows only required internal names. On AWS, security groups cannot block queries to the VPC resolver (AmazonProvidedDNS), so the mechanism there is Route 53 Resolver DNS Firewall; the mechanism is substrate-specific and proven by probes.
 - **No direct network route** to Mock Workday, other executions, or internal services. The only egress is the enforcement boundary.
 - **No platform or tenant credentials** in environment variables, files, or images.
+
+## Guest compromise (in scope since revision 1)
+
+**Boundary statement:**
+
+> An attacker may compromise everything inside an execution's guest environment: the agent, the sidecar, the files, and the execution credential. That must not yield another execution's identity, any downstream credential, or control of trusted runtime services. The isolation boundary around the guest, the external enforcement services, and their supporting infrastructure remain trusted.
+
+**Attacker positions.** "Escape" is not one event. Every assume-breach test must name the position it simulates:
+
+| Position | Meaning | In scope |
+|---|---|---|
+| P1: root in the container | Arbitrary code with every privilege the Pod spec allows | Yes |
+| P2: control of the guest kernel | A kernel or container-runtime exploit inside the isolation boundary (a microVM's guest kernel, or the shared node kernel if there is no VM boundary) | Yes |
+| P3: control of the physical host or hypervisor | Breaking the isolation boundary itself | No (see out of scope) |
+
+**Consequences:**
+
+- **The isolation unit is per execution.** Under P2, a shared kernel gives no separation between co-located executions. Executions therefore need a boundary that P2 does not cross: a VM-level boundary per execution (Fargate, Kata, Firecracker) or an equivalent sandbox. gVisor is a sandbox with its own kernel implementation and different trade-offs; it is not "a container with a smaller surface", and a VM is not "escape solved". The mechanism is chosen per substrate, with evidence.
+- **Nothing trusted runs inside or beside the guest.** The sidecar lives inside the execution boundary, so it is untrusted under P1 and P2. Downstream credentials, authoritative policy decisions, and the execution records live in trusted services outside the execution boundary, and outside the execution cluster's nodes.
+- **The execution credential is assumed stolen.** It must grant only that execution's own already-granted capabilities, at the gateway, while the execution is active.
+- **Assume-breach evidence:** from each in-scope position, enumerate what is reachable (credentials, network destinations, other executions, control-plane APIs). Running a root process in a constrained container simulates P1 only; it is not evidence about P2.
 
 ## Threat categories
 
@@ -89,7 +110,7 @@ The runtime's job is to ensure the agent cannot bypass the first layer or acquir
 
 | Threat | Rationale | Production direction |
 |---|---|---|
-| Kernel or container-runtime exploitation (container escape) | The Linux kernel, container runtime, and Kubernetes isolation are part of the trusted computing base in v1. | Stronger isolation such as gVisor, Kata Containers, or Firecracker microVMs, chosen per requirements |
+| Escaping the isolation boundary itself (P3: hypervisor, microVM monitor, or the provider's isolation, such as Fargate's) | The boundary around the guest is trusted; revision 1 moved container escape into scope (above) | Defense in depth around the hypervisor; provider responsibility under the shared-responsibility model |
 | Compromised cloud or Kubernetes control plane; malicious platform operators | Lab scope; these are part of the trusted base | Separation of duties, audit, restricted administrative access |
 | Hardware side channels | Lab scope | Dedicated nodes per tenant or confidential computing |
 | Internet-scale denial of service | Lab scope | Edge protection and rate limiting at ingress |

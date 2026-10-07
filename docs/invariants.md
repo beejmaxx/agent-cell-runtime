@@ -63,6 +63,7 @@
 | ID-11 | The runtime's control plane is tenant- and principal-scoped (reads, results, cancel, idempotent replay) | Using real, existing executions in both tenants, a caller cannot read, cancel, or replay another tenant's or another principal's execution (404). Positive control: the owner can. | R1 |
 
 | ID-12 | The gateway controls downstream destinations | An allowed operation cannot be used to choose an arbitrary URL, `Host`, authorization header, or downstream identity; the gateway builds every downstream request itself. Test: a malicious destination override is ignored or rejected, and no request reaches the attacker's destination. | R3 |
+| ID-13 | Bypassing or compromising the sidecar does not bypass authorization | The agent skips the sidecar and calls the gateway directly with its own valid execution credential: an operation outside the execution's allowlist is denied, and an allowed one succeeds (positive control). The gateway never accepts a sidecar's claim that a request was already checked. | R3 |
 
 ## Isolation (`ISO`)
 
@@ -83,6 +84,7 @@
 | ISO-6 | Fresh, ephemeral filesystem per execution | Read-only root filesystem (template). No persistent volumes or host paths. Execution A first **proves** it wrote a sentinel to its scratch space, then execution B confirms the sentinel is absent. | R2 |
 | ISO-7 | Basic resource limits are enforced, with bounded effect on neighbors | CPU quota throttles; exceeding the memory limit gives `OOMKilled`, and the execution becomes `FAILED`; disk and log filling are bounded by ephemeral-storage limits, and exceeding them evicts the Pod. Containment is measured: the node stays healthy, and a neighboring test workload finishes within a declared tolerance. A simple maximum-active-executions setting applies. Fork bombs and PID limits (kubelet `podPidsLimit`) and aggregate node abuse are R8. | R2 |
 | ISO-8 | The gateway cannot be overwhelmed by one execution | Request bodies over the maximum size are rejected, and concurrent in-flight gateway operations per execution are capped (excess requests are rejected) | R3 |
+| ISO-9 | Compromise of one execution's guest yields no other execution's identity, no downstream credential, and no control of trusted services (threat-model revision 1) | Assume-breach from each in-scope position (P1 root in the container; P2 guest-kernel control, simulated as far as the substrate allows), naming the position: enumerate reachable credentials, network destinations, other executions, and control-plane APIs. Only the execution's own credential and the gateway are reachable. A P1 simulation is never reported as P2 evidence. | Substrate decision (Fargate experiment) |
 
 ## Operations (`OP`)
 
