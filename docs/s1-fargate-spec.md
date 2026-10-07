@@ -384,3 +384,42 @@ report and applies the existing permissions assertions unchanged. No operator
 credentials or impersonation permissions are granted to the harness. Colima
 continues to query directly. The report is a setup-time permissions observation;
 E1 does not mutate this service account's grants.
+
+
+### LC-8 timing correction approved in review (2026-10-08)
+
+**Spec change:** E1's LC-8 observes the kubelet backstop against the Pod's
+`status.startTime`, not a fixed 60-second budget from execution creation.
+The test waits at most 300 seconds for startTime, then polls until
+`startTime + spec.activeDeadlineSeconds + 60 seconds`. The fixed 60-second
+margin covers termination and API observation; it does not extend runtime
+`deadline_at`. It must still observe **phase Failed, reason DeadlineExceeded**
+without reconciliation, then verify the database remains RUNNING until restart,
+and that reconciliation produces TIMED_OUT and deletes the Pod. All previous
+assertions remain.
+
+Source: the reviewer's decision and the [Kubernetes Pod API's
+activeDeadlineSeconds definition](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/),
+which measures the timer from startTime; this agrees with [R2 §1](r2-spec.md)
+and invariant LC-8. The prior EKS observation included about 35–45 seconds of
+startup latency. The backstop timer's overrun relative to the runtime deadline
+is bounded by Pod startup latency (plus the existing sub-second upward rounding
+of activeDeadlineSeconds). Actual observed termination also includes kubelet
+processing/termination delay; the fixed margin is a test budget, not a hard
+kill-time guarantee under node failure. No universal startup bound is claimed.
+
+**Re-verification required:** run the corrected LC-8 on the next approved EKS
+run. The historical failure remains recorded; this local test correction is
+not an EKS pass and changes no runtime behavior.
+
+**Trusted-side wall-clock coverage gap:** no existing test proves that a new
+completion is rejected at/after deadline_at with reconciliation stopped.
+`tests/test_lifecycle.py::test_LC_8_deadline_in_each_nonterminal_state` advances
+to the deadline and explicitly calls the reconciler; it does not prove the
+requested independent enforcement. The shared completion handler in
+`src/agent_runtime/api.py::complete` checks the credential hash and persisted
+status, without checking deadline_at. The R2 completion credential is an opaque
+secret with no independent expiry. The projected token's lifetime is not the
+completion credential's lifetime. Invariant ID-10 assigns gateway enforcement
+with the controller down to R3; it is not established by S1. No new runtime
+behavior is introduced in this follow-up.

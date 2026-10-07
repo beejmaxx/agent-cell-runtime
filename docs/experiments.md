@@ -857,3 +857,40 @@ recorded cluster security group and ENIs as well as tagged resources. Evidence:
 `retired-tagged-resources.json`, and `oidc-evidence.json`. No S1 resource
 leftovers were reported. The state bucket and foundation/bootstrap resources
 were not destroyed. Checkpoint 4 stops here for review; no push was performed.
+
+
+## 2026-10-08 — LC-8 local timing correction after S1 review
+
+The reviewer classified the EKS LC-8 failure as an incorrect test budget, not
+an observed runtime regression. Kubernetes starts activeDeadlineSeconds at Pod
+startTime; Fargate startup consumed about 35–45 seconds before that clock began.
+The test now obtains startTime (a separate 300-second bounded startup wait) and
+polls until startTime + the admitted activeDeadlineSeconds + a fixed 60-second
+termination/observation margin. It still requires Failed/DeadlineExceeded,
+RUNNING in the unreconciled database, TIMED_OUT after restart/reconciliation,
+and Pod deletion. Source and the agreed specification change are recorded in
+[S1's LC-8 timing correction](s1-fargate-spec.md#lc-8-timing-correction-approved-in-review-2026-10-08),
+including the Kubernetes API reference.
+
+The kubelet timer's overrun is bounded by Pod startup latency, with the existing
+sub-second duration rounding; observed termination can additionally lag while
+the healthy kubelet processes termination and reports status. This does not
+turn the kubelet backstop into the runtime's absolute deadline enforcement.
+**LC-8 needs re-verification on the next EKS run.** The original failed result
+is preserved; no cluster was started and no AWS operation was performed here.
+
+The requested independent trusted-side deadline test **does not exist**.
+`test_LC_8_deadline_in_each_nonterminal_state` explicitly reconciles at the
+deadline. Inspection of `api.complete` shows a credential/status check, no
+persisted-deadline check, and no independent expiry for the opaque completion
+credential. Thus current tests do not establish rejection of a new late
+completion while the database still says RUNNING. ID-10 reserves that gateway
+guarantee for R3. This follow-up adds no runtime behavior and does not claim
+that the missing guarantee has been verified.
+
+Local validation on merged main `0d42501`: `make test` passed **227 tests**,
+with **22 deselected**, in **42.85 s** (one existing Starlette deprecation
+warning). Kubernetes and integration tests were not run. `uv run ruff check
+ tests/test_k8s.py`, Ruff formatting, and `git diff --check` passed. Raw unit
+output: `.local/s1/lc8-local-followup-unit.log`. No runtime source changed;
+no AWS calls, cluster startup, or push were performed.

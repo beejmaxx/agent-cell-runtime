@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -217,11 +218,19 @@ def test_LC_8_kubelet_deadline_without_reconciler(live):
     reconcile(live)
     name = f"exec-{execution_id}"
     pod = poll(
+        lambda: p if (p := evidence(name)) and p.get("status", {}).get("startTime") else None,
+        300,
+    )
+    # The kubelet timer starts after scheduling, not at runtime execution creation.
+    started_at = datetime.fromisoformat(pod["status"]["startTime"])
+    observe_until = started_at + timedelta(seconds=pod["spec"]["activeDeadlineSeconds"] + 60)
+    pod = poll(
         lambda: (
             p if (p := evidence(name)) and p.get("status", {}).get("phase") == "Failed" else None
         ),
-        60,
+        max(0, (observe_until - datetime.now(UTC)).total_seconds()),
     )
+    assert pod["status"]["phase"] == "Failed"
     assert pod["status"]["reason"] == "DeadlineExceeded"
     assert row(live, execution_id)["status"] == "RUNNING"
     restart(live)
